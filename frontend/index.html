@@ -47,7 +47,7 @@
         </fieldset>
 
         <div class="mode-pane" data-mode="draw">
-          <p class="small muted">Use the <strong>rectangle tool</strong> on the map (top-left), or switch to Bounds / Point to type coordinates.</p>
+          <p class="small muted">Use the <strong>rectangle, polygon or circle</strong> tool on the map (top-left), or switch to Bounds / Point to type coordinates. Only fires inside the shape are counted.</p>
         </div>
         <div class="mode-pane fields4" data-mode="bounds" hidden>
           <label>West <input id="f-w" type="number" step="any" min="-180" max="180" inputmode="decimal" /></label>
@@ -72,14 +72,14 @@
           <label class="toggle small"><input type="checkbox" id="cells-toggle" checked /> Fire cells on map</label>
         </div>
       </form>
-      <div id="map" role="region" aria-label="Map. Draw a rectangle to choose an area; coordinates can also be typed above."></div>
+      <div id="map" role="region" aria-label="Map. Draw a rectangle, polygon or circle to choose an area; coordinates can also be typed above."></div>
     </section>
 
     <!-- ───────────── Right: analysis ───────────── -->
     <section id="analysis" class="right" aria-label="Analysis" tabindex="-1">
       <div id="empty" class="empty">
         <h1>Pick an area to see its burning calendar</h1>
-        <p>Draw a rectangle on the map, type coordinates, or choose a quick pick. firex merges MODIS (2001→) and VIIRS (2012→) fire detections into one VIIRS-equivalent record of <em>fire cell-days</em>: the number of 0.05° grid cells with a vegetation fire on a given day.</p>
+        <p>Draw a rectangle, polygon or circle on the map, type coordinates, or choose a quick pick. firex merges MODIS (2001→) and VIIRS (2012→) fire detections into one VIIRS-equivalent record of <em>fire cell-days</em>: the number of 0.05° grid cells with a vegetation fire on a given day.</p>
       </div>
 
       <div id="cards" hidden>
@@ -101,11 +101,13 @@
               <div class="seg seg-sm" role="radiogroup" aria-label="Calendar color">
                 <label><input type="radio" name="calmode" value="counts" checked /> <span>Counts</span></label>
                 <label><input type="radio" name="calmode" value="anomaly" /> <span>Anomaly vs. median</span></label>
+                <label><input type="radio" name="calmode" value="raw" /> <span>Raw sensors</span></label>
               </div>
               <button type="button" class="btn btn-ghost btn-sm" id="png-calendar">PNG</button>
             </div>
           </header>
-          <p class="card-sub">Fire cell-days per month (VIIRS-equivalent). Hover or focus a cell; use arrow keys to move.</p>
+          <p class="card-sub">Fire cell-days per month (VIIRS-equivalent). Hover or focus a cell; use arrow keys to move. <em>Raw sensors</em> shows the record without harmonization.</p>
+          <p id="handoff" class="handoff" hidden></p>
           <div class="card-body cal-wrap">
             <div id="calendar"></div>
             <div id="cal-tip" class="tip" role="tooltip" hidden></div>
@@ -145,6 +147,30 @@
           <div class="card-body" aria-live="polite"></div>
         </article>
 
+        <article class="card" id="card-alerts" aria-labelledby="h-alerts">
+          <header class="card-h">
+            <h2 id="h-alerts">Alerts</h2>
+            <button type="button" class="btn btn-ghost btn-sm" id="alerts-check">Check now</button>
+          </header>
+          <p class="card-sub">Get notified when the selected area’s latest month reaches a multiple of its historical median. Alerts are checked on demand here, or by <code>python -m backend.app.alerts</code> after each data refresh, and fire at most once a month.</p>
+          <form id="alert-form" class="alert-form" novalidate>
+            <label>Name <input id="a-name" type="text" maxlength="80" placeholder="optional" /></label>
+            <label>Notify at
+              <select id="a-threshold">
+                <option value="1.5">1.5× median</option>
+                <option value="2" selected>2× median</option>
+                <option value="3">3× median</option>
+                <option value="5">5× median</option>
+              </select>
+            </label>
+            <label>Email <input id="a-email" type="email" maxlength="254" placeholder="optional" autocomplete="email" /></label>
+            <label>Webhook <input id="a-webhook" type="url" maxlength="500" placeholder="https://… optional" /></label>
+            <button type="submit" class="btn btn-primary btn-sm">Alert me for this area</button>
+          </form>
+          <p id="alert-error" class="form-error" role="alert"></p>
+          <div class="card-body" aria-live="polite"></div>
+        </article>
+
         <article class="card" id="card-downloads" aria-labelledby="h-downloads">
           <header class="card-h"><h2 id="h-downloads">Downloads</h2></header>
           <div class="card-body dl-row">
@@ -162,6 +188,7 @@
           <p><strong>Clean.</strong> We keep vegetation fires only (FIRMS type 0), drop low-confidence detections (MODIS confidence &lt; 30, VIIRS “low”), and remove duplicates.</p>
           <p><strong>Grid.</strong> Detections are counted as <em>fire cell-days</em>: a 0.05° cell (~5.5 km) that burned on a given day counts once, whichever sensor saw it. This blunts the resolution gap between MODIS (1 km) and VIIRS (375 m).</p>
           <p id="how-ratio"><strong>Learn the conversion.</strong> On the overlap years (2012 onward) we fit, for each calendar month, how many VIIRS cell-days each MODIS cell-day is worth, separately for weak and strong (high-FRP) MODIS detections. VIIRS’ finer pixels add far more detections around small, weak fires than around big intense ones, so one flat ratio would overstate big-wildfire years. A simple monthly ratio is kept as a baseline for comparison.</p>
+          <p><strong>Alternative: quantile mapping.</strong> For each month we also match the distribution of per-cell MODIS fire days to the VIIRS distribution (a cell with <em>k</em> MODIS fire days maps to the VIIRS count at the same percentile, scaled for the extra cells VIIRS lights up). All methods are scored on the same held-out years below; the one marked “in use” is set in <code>pipeline/config.py</code>.</p>
           <p><strong>Convert.</strong> MODIS-only years (2001–2011) are converted with that monthly fit, so the whole record reads in VIIRS-equivalent units. Converted months carry a 10–90% uncertainty band in the calendar tooltips.</p>
         </div>
         <div id="validation" class="card-body" aria-live="polite"></div>

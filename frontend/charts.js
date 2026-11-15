@@ -68,12 +68,18 @@ function gradientDef(id, fn, n = 24) {
  * Build the calendar SVG string. Returns { svg, index } where index maps "y-m" → month record.
  * Cells carry data-y / data-m for event delegation; tooltips are handled by the caller.
  */
+export const OVERLAP_START = 2012;
+/** Value shown for a month in a calendar mode ("counts" | "anomaly" | "raw"). */
+export const calValue = (d, mode) => (mode === "raw" ? d?.raw : d?.value);
+
 export function calendarSVG(data, mode, coverage) {
   const months = data.months || [];
   const by = new Map(months.map((m) => [`${m.year}-${m.month}`, m]));
   const years = [...new Set(months.map((m) => m.year))].sort((a, b) => a - b);
   if (!years.length) return { svg: "", years };
-  const max = Math.max(0, ...months.map((m) => m.value ?? 0));
+  // Counts and raw share one color scale so toggling between them shows the sensor jump honestly.
+  const max = Math.max(0, ...months.map((m) => Math.max(m.value ?? 0, m.raw ?? 0)));
+  const raw = mode === "raw";
   const peak = data.summary?.peak_month;
   const covTo = coverage?.to ? coverage.to.split("-").map(Number) : null;
 
@@ -84,7 +90,8 @@ export function calendarSVG(data, mode, coverage) {
   const H = legendY + 64;
   const conv = years.filter((y) => months.some((m) => m.year === y && m.source === "modis_converted"));
 
-  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" tabindex="-1" role="group" aria-label="Burning calendar, ${years[0]} to ${years.at(-1)}, colored by ${mode === "anomaly" ? "anomaly versus monthly median" : "fire cell-days"}. Use arrow keys to move between months.">`;
+  const modeDesc = mode === "anomaly" ? "anomaly versus monthly median" : raw ? "raw, un-harmonized fire cell-days (MODIS before 2012, VIIRS after)" : "fire cell-days";
+  let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" tabindex="-1" role="group" aria-label="Burning calendar, ${years[0]} to ${years.at(-1)}, colored by ${modeDesc}. Use arrow keys to move between months.">`;
   s += `<defs>${gradientDef("g-count", (t) => viridis(t))}${gradientDef("g-anom", diverging)}`;
   s += `<pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="4" fill="#2a313b"/><line x1="0" y1="0" x2="0" y2="4" stroke="${C.muted}" stroke-width="1.6"/></pattern></defs>`;
   s += `<rect width="${W}" height="${H}" fill="${C.bg}"/>`;
@@ -92,8 +99,8 @@ export function calendarSVG(data, mode, coverage) {
   // month header
   MONTHS.forEach((m, i) => (s += txt(L + i * (cw + gap) + cw / 2, T - 9, m[0] + m.slice(1, 3), { anchor: "middle", size: 10.5 })));
 
-  // MODIS-converted bracket on the left edge
-  if (conv.length) {
+  // MODIS-converted bracket on the left edge (harmonized views only)
+  if (conv.length && !raw) {
     const r0 = years.indexOf(conv[0]), r1 = years.indexOf(conv.at(-1));
     s += `<rect x="2" y="${T + r0 * (ch + gap)}" width="5" height="${(r1 - r0 + 1) * (ch + gap) - gap}" fill="url(#hatch)" rx="1"/>`;
   }
@@ -108,11 +115,13 @@ export function calendarSVG(data, mode, coverage) {
       const d = by.get(`${y}-${mo}`);
       const future = covTo && (y > covTo[0] || (y === covTo[0] && mo > covTo[1]));
       let fill;
-      if (!d || d.value == null) fill = future ? "none" : C.missing;
+      const v = calValue(d, mode);
+      if (!d || v == null) fill = future ? "none" : C.missing;
+      else if (raw) fill = viridis(countT(v, max));
       else if (mode === "anomaly") fill = d.anomaly == null ? (d.value > 0 ? diverging(1) : diverging(0.5)) : diverging(anomalyT(d.anomaly));
       else fill = viridis(countT(d.value, max));
-      if (future && (!d || d.value == null)) continue;
-      s += `<rect class="cell" data-y="${y}" data-m="${mo}" x="${x}" y="${yy}" width="${cw}" height="${ch}" rx="2" fill="${fill}" tabindex="-1" role="img" aria-label="${esc(cellLabel(y, mo, d, data))}"/>`;
+      if (future && (!d || v == null)) continue;
+      s += `<rect class="cell" data-y="${y}" data-m="${mo}" x="${x}" y="${yy}" width="${cw}" height="${ch}" rx="2" fill="${fill}" tabindex="-1" role="img" aria-label="${esc(cellLabel(y, mo, d, data, mode))}"/>`;
       if (d?.partial) {
         s += `<rect x="${x + 1}" y="${yy + 1}" width="${cw - 2}" height="${ch - 2}" rx="1.5" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-dasharray="3 2" pointer-events="none"/>`;
       }
@@ -122,7 +131,15 @@ export function calendarSVG(data, mode, coverage) {
       }
     }
   });
-  s += peakRect;
+  if (!raw) s += peakRect;
+  // Sensor handoff line between the last MODIS-only year and the first VIIRS year.
+  const hi = years.indexOf(OVERLAP_START);
+  if (raw && hi > 0) {
+    const ly = T + hi * (ch + gap) - gap / 2;
+    s += `<line x1="${L - 4}" x2="${L + 12 * (cw + gap) - gap + 4}" y1="${ly}" y2="${ly}" stroke="${C.accent}" stroke-width="2" stroke-dasharray="5 3"/>`;
+    s += txt(L + 12 * (cw + gap) + 2, ly + 3.5, "VIIRS", { size: 9.5, fill: C.accent });
+    s += txt(L + 12 * (cw + gap) + 2, ly - 5, "MODIS", { size: 9.5, fill: C.muted });
+  }
 
   // legend
   const lx = L, lw = 12 * (cw + gap) - gap - 150;
@@ -135,7 +152,7 @@ export function calendarSVG(data, mode, coverage) {
       s += txt(x, legendY + 31, anomLabel(a), { anchor: "middle", size: 10, fill: a === 1 ? C.text : C.muted });
     });
   } else {
-    s += txt(lx, legendY, "Fire cell-days per month (square-root scale)", { size: 10.5 });
+    s += txt(lx, legendY, raw ? "Raw fire cell-days, as each sensor saw them (not harmonized)" : "Fire cell-days per month (square-root scale)", { size: 10.5 });
     s += `<rect x="${lx}" y="${legendY + 6}" width="${lw}" height="10" rx="2" fill="url(#g-count)"/>`;
     const ticks = niceTicks(max, 4);
     ticks.forEach((v, i) => {
@@ -148,12 +165,15 @@ export function calendarSVG(data, mode, coverage) {
   // key: missing, peak, converted
   const kx = lx + lw + 18;
   s += `<rect x="${kx}" y="${legendY - 3}" width="12" height="9" rx="1.5" fill="${C.missing}"/>` + txt(kx + 17, legendY + 5, "No data", { size: 10 });
-  s += `<rect x="${kx}" y="${legendY + 12}" width="12" height="9" rx="1.5" fill="none" stroke="#fff" stroke-width="1.6"/>` + txt(kx + 17, legendY + 20, "Peak month", { size: 10 });
+  if (!raw) s += `<rect x="${kx}" y="${legendY + 12}" width="12" height="9" rx="1.5" fill="none" stroke="#fff" stroke-width="1.6"/>` + txt(kx + 17, legendY + 20, "Peak month", { size: 10 });
   const hasPartial = months.some((m) => m.partial);
   if (hasPartial) {
     s += `<rect x="${kx + 72 + 18}" y="${legendY - 3}" width="12" height="9" rx="1.5" fill="none" stroke="#fff" stroke-width="1.3" stroke-dasharray="3 2"/>` + txt(kx + 72 + 35, legendY + 5, "In progress", { size: 10 });
   }
-  if (conv.length) {
+  if (raw && hi > 0) {
+    s += `<line x1="${kx}" x2="${kx + 12}" y1="${legendY + 16}" y2="${legendY + 16}" stroke="${C.accent}" stroke-width="2" stroke-dasharray="4 2"/>` + txt(kx + 17, legendY + 20, "Sensor switch", { size: 10 });
+    s += txt(lx, legendY + 50, `Before ${OVERLAP_START}: raw MODIS. From ${OVERLAP_START}: raw VIIRS. The jump at the line is the sensor change, not more fire.`, { size: 9.5 });
+  } else if (conv.length) {
     s += `<rect x="${kx + 3}" y="${legendY + 27}" width="5" height="10" fill="url(#hatch)"/>` + txt(kx + 17, legendY + 35, `MODIS → VIIRS-equiv.`, { size: 10 });
     s += txt(lx, legendY + 50, `Hatched years (${conv[0]}–${conv.at(-1)}): MODIS converted to VIIRS-equivalent; later years VIIRS measured.`, { size: 9.5 });
   }
@@ -161,8 +181,12 @@ export function calendarSVG(data, mode, coverage) {
   return { svg: s, years, by };
 }
 
-export function cellLabel(y, mo, d, data) {
+export function cellLabel(y, mo, d, data, mode = "counts") {
   const name = `${MONTHS_LONG[mo - 1]} ${y}`;
+  if (mode === "raw") {
+    if (!d || d.raw == null) return `${name}: no data`;
+    return `${name}: ${fmt(d.raw)} raw ${d.raw_source === "modis" ? "MODIS" : "VIIRS"} fire cell-days${d.partial ? " so far" : ""}; harmonized ${fmt(d.value)}`;
+  }
   if (!d || d.value == null) return `${name}: no data`;
   const med = data.median_by_month?.[mo] ?? data.median_by_month?.[String(mo)];
   let s = `${name}: ${fmt(d.value)} fire cell-days`;
@@ -235,11 +259,17 @@ export function validationSVG(annual) {
     s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="${C.line}"/>`;
     s += txt(L - 6, y(v) + 3.5, fmt(v, 0), { anchor: "end", size: 10 });
   });
+  const drift = rows.filter((r) => r.modis_drift?.length);
+  if (drift.length) {
+    const i0 = rows.indexOf(drift[0]);
+    s += `<defs><pattern id="vhatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#3a414b" stroke-width="2"/></pattern></defs>`;
+    s += `<rect x="${L + gw * i0}" y="${T}" width="${gw * drift.length}" height="${ph}" fill="url(#vhatch)" opacity="0.6"/>`;
+  }
   rows.forEach((r, i) => {
     const cx = L + gw * (i + 0.5);
     s += `<rect x="${cx - bw - 1}" y="${y(r.observed)}" width="${bw}" height="${T + ph - y(r.observed)}" fill="#c9d1db"><title>${r.year} observed VIIRS: ${fmt(r.observed)}</title></rect>`;
     s += `<rect x="${cx + 1}" y="${y(r.predicted)}" width="${bw}" height="${T + ph - y(r.predicted)}" fill="#56b4e9"><title>${r.year} predicted from MODIS: ${fmt(r.predicted)}</title></rect>`;
-    s += txt(cx, H - 9, r.year, { anchor: "middle", size: 10 });
+    s += txt(cx, H - 9, r.year + (r.modis_drift?.length ? "*" : ""), { anchor: "middle", size: 10 });
     if (r.error_pct != null) s += txt(cx, Math.min(y(r.observed), y(r.predicted)) - 4, `${r.error_pct > 0 ? "+" : ""}${r.error_pct.toFixed(1)}%`, { anchor: "middle", size: 9.5 });
   });
   s += `<rect x="${L}" y="9" width="12" height="9" fill="#c9d1db"/>` + txt(L + 17, 17, "Observed VIIRS", { size: 10.5 });
