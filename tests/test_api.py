@@ -116,3 +116,70 @@ def test_parallel_requests_do_not_collide(demo_data):
     with ThreadPoolExecutor(12) as ex:
         codes = list(ex.map(lambda p: demo_data.get(p[0], params=p[1]).status_code, paths))
     assert set(codes) == {200}
+
+
+def test_raw_series_and_handoff(demo_data):
+    cal = demo_data.get("/calendar", params={"bbox": CA}).json()
+    m = cal["months"]
+    assert {x["raw_source"] for x in m if x["year"] < 2012} == {"modis"}
+    assert {x["raw_source"] for x in m if x["year"] >= 2012} == {"viirs"}
+    ho = cal["handoff"]
+    assert ho["before_years"] == [2009, 2011] and ho["after_years"] == [2012, 2014]
+    assert abs(ho["harmonized_jump"] - 1) < abs(ho["raw_jump"] - 1)
+    assert "raw" in demo_data.get("/calendar.csv", params={"bbox": CA}).text.splitlines()[0]
+
+
+def test_polygon_and_circle_areas(demo_data):
+    c = demo_data
+    total = lambda **p: c.get("/calendar", params=p).json()["summary"]["total"]  # noqa: E731
+    box = total(bbox=CA)
+    # Triangle = half of the California bbox (west/south half).
+    tri = total(poly="-124.5,32.5;-114,32.5;-124.5,42")
+    assert 0 < tri < box
+    circ = c.get("/calendar", params={"circle": "-120,37,150"}).json()
+    assert circ["area_kind"] == "circle" and circ["area_km2"] == pytest.approx(3.14159 * 150 ** 2, rel=1e-3)
+    assert 0 < circ["summary"]["total"] < box
+    # Every endpoint takes the shape params.
+    for path, extra in [("/current", {}), ("/cells", {}), ("/events", {}), ("/precedent", {"month": 8}),
+                        ("/csv", {"from": "2020-08-01", "to": "2020-08-31"}), ("/brief", {})]:
+        assert c.get(path, params={"circle": "-120,37,150", **extra}).status_code == 200, path
+    cells = c.get("/cells", params={"circle": "-120,37,150", "limit": 50000}).json()["cells"]
+    from backend.app.area import haversine_km
+    assert all(haversine_km(x["lat"], x["lon"], 37, -120) <= 150 for x in cells)
+    assert c.get("/calendar", params={"poly": "-120,37;-119,37"}).status_code == 400
+    assert c.get("/calendar", params={"circle": "-120,37,0"}).status_code == 400
+    assert c.get("/calendar").status_code == 400
+
+
+def test_validation_compares_methods_and_flags_drift(demo_data):
+    v = demo_data.get("/validation", params={"bbox": CA}).json()
+    assert [m["method"] for m in v["methods"]] == ["ratio", "frp_strata", "quantile"]
+    assert v["drift_from"] == {"Terra": 2020, "Aqua": 2022}
+    assert all(r["modis_drift"] for r in v["annual"])  # test years 2021+ are all drift years
+
+
+def test_alerts_lifecycle(demo_data, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "ALERTS_FILE", tmp_path / "alerts.json")
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    c = demo_data
+    assert c.get("/alerts").json()["alerts"] == []
+    assert c.post("/alerts", json={"bbox": CA, "email": "not-an-email"}).status_code == 400
+    assert c.post("/alerts", json={"bbox": CA, "webhook": "http://x"}).status_code == 400
+    assert c.post("/alerts", json={"threshold": 2}).status_code == 400
+    r = c.post("/alerts", json={"circle": "-120,37,150", "threshold": 1.01, "name": "Sierra", "email": "ops@example.com"})
+    assert r.status_code == 201
+    a = r.json()
+    assert a["email"] == "o…@example.com" and a["area"] == {"circle": "-120.0,37.0,150.0"}
+    assert set(a["status"]) >= {"triggered", "ratio", "value", "median"}
+    hi = c.post("/alerts", json={"bbox": CA, "threshold": 20}).json()
+    lst = c.get("/alerts").json()["alerts"]
+    assert [x["id"] for x in lst] == [a["id"], hi["id"]]
+    res = {x["alert"]["id"]: x for x in c.post("/alerts/check").json()["results"]}
+    assert res[hi["id"]]["notified"] == []  # 20× is never reached
+    assert res[a["id"]]["status"]["triggered"]  # demo Nov 2026 is well above 1.01× median
+    assert res[a["id"]]["notified"] == ["logged (SMTP_HOST not set)"]
+    again = {x["alert"]["id"]: x for x in c.post("/alerts/check").json()["results"]}
+    assert again[a["id"]]["notified"] == []  # once per month
+    assert c.delete(f"/alerts/{a['id']}").status_code == 204
+    assert c.delete(f"/alerts/{a['id']}").status_code == 404
+    assert [x["id"] for x in c.get("/alerts").json()["alerts"]] == [hi["id"]]
