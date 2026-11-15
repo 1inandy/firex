@@ -7,3 +7,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 pytest>=8
 httpx>=0.27
+anthropic>=1.0  # optional: grounded LLM briefing (/brief falls back to a template without it)

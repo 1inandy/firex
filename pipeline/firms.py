@@ -40,7 +40,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_archive(path: Path) -> pd.DataFrame:
     """Load every FIRMS CSV under `path` (archive downloads or yearly country files)."""
-    files = sorted(Path(path).rglob("*.csv"))
+    files = sorted([*Path(path).rglob("*.csv"), *Path(path).rglob("*.csv.gz")])
     if not files:
         raise FileNotFoundError(f"No CSV files under {path}")
     return pd.concat([normalize(pd.read_csv(f)) for f in files], ignore_index=True)

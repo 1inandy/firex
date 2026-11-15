@@ -21,7 +21,7 @@ Preset quick-pick areas.
 Harmonized month × year series (VIIRS-equivalent fire cell-days).
 ```json
 {"months": [{"year": 2001, "month": 1, "value": 12.0, "lo": 9.1, "hi": 15.2,
-             "source": "modis_converted", "anomaly": 0.4}],
+             "source": "modis_converted", "anomaly": 0.4, "partial": false}],
  "median_by_month": {"1": 10.0, "...": 0},
  "seasonality": [{"month": 1, "median": 10.0, "p10": 2.0, "p90": 30.0}],
  "summary": {
@@ -34,7 +34,8 @@ Harmonized month × year series (VIIRS-equivalent fire cell-days).
  }}
 ```
 - `source`: `"viirs"` (2012→, measured) or `"modis_converted"` (2001–2011, MODIS × monthly ratio). `lo/hi` = 10–90% ratio band (equal to value for VIIRS).
-- `anomaly` = value ÷ median for that calendar month (null if median is 0).
+- `anomaly` = value ÷ median for that calendar month (null if median is 0). Medians use complete months only.
+- `partial: true` marks the month still in progress (its value covers only the days observed so far).
 - `trend_per_decade_pct` may be null (too few years).
 
 ## `/current?bbox`
@@ -84,11 +85,13 @@ Grounded plain-language briefing. Every number in `text` is checked against `fac
 ```
 `model` is `"template"` unless `ANTHROPIC_API_KEY` is set.
 
-## `/validation`
+## `/validation?bbox` (bbox optional: picks the region containing its centre)
 Region-wide out-of-sample check of the harmonization: ratios fit on 2012–2020, applied to MODIS 2021→, compared to real VIIRS.
 ```json
-{"train_years": [2012, 2020], "test_years": [2021, 2026],
+{"region": "california", "region_name": "California", "method": "frp_strata",
+ "train_years": [2012, 2020], "test_years": [2021, 2026],
  "monthly": [{"year": 2021, "month": 1, "predicted": 100.0, "observed": 110.0, "modis_raw": 30.0}],
  "annual": [{"year": 2021, "predicted": 1200.0, "observed": 1300.0, "error_pct": -7.7}],
- "mape_monthly_pct": 18.2, "annual_abs_error_pct": 6.1, "r2": 0.91}
+ "mape_monthly_pct": 18.2, "annual_abs_error_pct": 6.1, "r2": 0.91,
+ "baseline": {"method": "ratio", "mape_monthly_pct": 25.9, "annual_abs_error_pct": 25.6, "r2": 0.83}}
 ```
