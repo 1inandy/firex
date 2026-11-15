@@ -1,6 +1,6 @@
 import {
   MONTHS, MONTHS_LONG, viridis, countT, fmt, fmtRatio, niceTicks,
-  calendarSVG, cellLabel, seasonalitySVG, validationSVG, svgToPng,
+  calendarSVG, cellLabel, seasonalitySVG, validationSVG, svgToPng, calValue, OVERLAP_START,
 } from "./charts.js";
 
 const API = (new URLSearchParams(location.search).get("api") || "http://localhost:8000").replace(/\/$/, "");
@@ -21,7 +21,8 @@ const el = (tag, attrs = {}, ...kids) => {
 const state = {
   health: null,
   coverage: null,
-  bbox: null,           // [W,S,E,N]
+  bbox: null,           // [W,S,E,N] envelope of the selected area
+  area: null,           // {kind: "bbox"|"poly"|"circle", bbox, poly?: [[lon,lat],…], circle?: [lon,lat,km]}
   from: null, to: null, // "YYYY-MM"
   calendar: null,
   current: null,
@@ -55,6 +56,25 @@ async function getJSON(path, params, signal, retries = 1) {
     const err = new Error(msg); err.status = r.status; throw err;
   }
   return r.json();
+}
+
+async function sendJSON(method, path, body) {
+  let r;
+  try {
+    r = await fetch(apiUrl(path), { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  } catch {
+    throw new Error(`Can't reach the API at ${API}.`);
+  }
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (typeof j.detail === "string") msg = j.detail;
+      else if (Array.isArray(j.detail)) msg = j.detail.map((d) => `${(d.loc || []).slice(-1)[0] || "field"}: ${d.msg}`).join("; ");
+    } catch {}
+    const err = new Error(msg); err.status = r.status; throw err;
+  }
+  return r.status === 204 ? null : r.json();
 }
 
 // ───────────────────────── card states ─────────────────────────
@@ -101,6 +121,41 @@ function pointToBbox(lat, lon, km) {
   const dlon = km / (111.32 * Math.max(Math.cos(lat * Math.PI / 180), 0.01));
   return [Math.max(-180, lon - dlon), Math.max(-90, lat - dlat), Math.min(180, lon + dlon), Math.min(90, lat + dlat)];
 }
+const r4 = (v) => Math.round(v * 1e4) / 1e4;
+function polyKm2(pts) {
+  const R = 6371.0088, rad = Math.PI / 180;
+  const lat0 = pts.reduce((a, p) => a + p[1], 0) / pts.length * rad;
+  const xy = pts.map(([x, y]) => [x * rad * R * Math.cos(lat0), y * rad * R]);
+  let a = 0;
+  xy.forEach(([x1, y1], i) => { const [x2, y2] = xy[(i + 1) % xy.length]; a += x1 * y2 - x2 * y1; });
+  return Math.abs(a) / 2;
+}
+function shapeKm2(a) {
+  if (a.kind === "circle") return Math.PI * a.circle[2] ** 2;
+  if (a.kind === "poly") return polyKm2(a.poly);
+  return areaKm2(a.bbox);
+}
+/** API query params for the selected area (exactly one of bbox / poly / circle). */
+function areaParams(a = state.area) {
+  if (!a) return {};
+  if (a.kind === "poly") return { poly: a.poly.map(([x, y]) => `${r4(x)},${r4(y)}`).join(";") };
+  if (a.kind === "circle") return { circle: a.circle.map(r4).join(",") };
+  return { bbox: bboxStr(a.bbox) };
+}
+function parseAreaQuery(q) {
+  const poly = q.get("poly"), circle = q.get("circle"), bbox = parseBbox(q.get("bbox"));
+  if (poly) {
+    const pts = poly.split(";").map((p) => p.split(",").map(Number));
+    if (pts.length >= 3 && pts.every((p) => p.length === 2 && p.every(Number.isFinite))) return { kind: "poly", poly: pts };
+  }
+  if (circle) {
+    const c = circle.split(",").map(Number);
+    if (c.length === 3 && c.every(Number.isFinite) && c[2] > 0 && c[2] <= 2000) return { kind: "circle", circle: c };
+  }
+  if (bbox && !bboxError(bbox)) return { kind: "bbox", bbox };
+  return null;
+}
+const AREA_NAMES = { bbox: "Rectangle", poly: "Polygon", circle: "Circle" };
 
 // ───────────────────────── map ─────────────────────────
 const map = L.map("map", { preferCanvas: true, worldCopyJump: true, zoomSnap: 0.25 }).setView([37, -119.5], 5);
@@ -116,20 +171,33 @@ L.tileLayer(`${ESRI}/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}`, { pa
 new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById("map"));
 
 const ACCENT = "#f0a04b";
+const SHAPE = { color: ACCENT, weight: 2, fill: false, dashArray: "6 4" };
 const drawn = new L.FeatureGroup().addTo(map);
 const cellsLayer = L.layerGroup();
 const eventLayer = L.layerGroup().addTo(map);
 map.addControl(new L.Control.Draw({
   position: "topleft",
   draw: {
-    rectangle: { shapeOptions: { color: ACCENT, weight: 2, fill: false, dashArray: "6 4" }, showArea: false },
-    polygon: false, polyline: false, circle: false, marker: false, circlemarker: false,
+    rectangle: { shapeOptions: SHAPE, showArea: false },
+    polygon: { shapeOptions: SHAPE, allowIntersection: false, showArea: false },
+    circle: { shapeOptions: SHAPE, showRadius: true, metric: true },
+    polyline: false, marker: false, circlemarker: false,
   },
   edit: false,
 }));
 map.on(L.Draw.Event.CREATED, (e) => {
-  const b = e.layer.getBounds();
-  setBbox([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+  const lyr = e.layer;
+  showFormError("");
+  if (e.layerType === "circle") {
+    const c = lyr.getLatLng(), km = lyr.getRadius() / 1000;
+    if (km > 2000) return showFormError("Circles can be at most 2000 km in radius.");
+    setArea({ kind: "circle", circle: [c.lng, c.lat, km] });
+  } else if (e.layerType === "polygon") {
+    setArea({ kind: "poly", poly: lyr.getLatLngs()[0].map((p) => [p.lng, p.lat]) });
+  } else {
+    const b = lyr.getBounds();
+    setArea({ kind: "bbox", bbox: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()] });
+  }
   analyze();
 });
 
@@ -161,12 +229,16 @@ $("#cells-toggle").addEventListener("change", (e) => {
 });
 if ($("#cells-toggle").checked) cellsLayer.addTo(map);
 
-function drawSelection(b, fit = true) {
+function drawSelection(a, fit = true) {
   drawn.clearLayers();
-  const rect = L.rectangle([[b[1], b[0]], [b[3], b[2]]], { color: ACCENT, weight: 2, fill: false, dashArray: "6 4", interactive: false });
-  drawn.addLayer(rect);
+  const opts = { ...SHAPE, interactive: false };
+  const b = a.bbox;
+  const shape = a.kind === "circle" ? L.circle([a.circle[1], a.circle[0]], { ...opts, radius: a.circle[2] * 1000 })
+    : a.kind === "poly" ? L.polygon(a.poly.map(([x, y]) => [y, x]), opts)
+    : L.rectangle([[b[1], b[0]], [b[3], b[2]]], opts);
+  drawn.addLayer(shape);
   map.invalidateSize();
-  if (fit) map.fitBounds(rect.getBounds(), { padding: [24, 24], maxZoom: 10, animate: !matchMedia("(prefers-reduced-motion: reduce)").matches });
+  if (fit) map.fitBounds(L.latLngBounds([[b[1], b[0]], [b[3], b[2]]]), { padding: [24, 24], maxZoom: 10, animate: !matchMedia("(prefers-reduced-motion: reduce)").matches });
 }
 
 // ───────────────────────── form ─────────────────────────
@@ -183,37 +255,51 @@ function showFormError(msg, field) {
   if (field) { field.setAttribute("aria-invalid", "true"); field.focus(); }
 }
 
-function setBbox(b) {
-  state.bbox = b.map(r3);
-  [fields.w.value, fields.s.value, fields.e.value, fields.n.value] = state.bbox;
-  const c = [(b[1] + b[3]) / 2, (b[0] + b[2]) / 2];
-  fields.lat.value = r3(c[0]); fields.lon.value = r3(c[1]);
-  $("#area-readout").textContent = `Area ${bboxStr(state.bbox)} · ≈ ${fmt(areaKm2(state.bbox), 0)} km²`;
-  document.querySelectorAll(".chip").forEach((ch) => ch.setAttribute("aria-pressed", String(ch.dataset.bbox === bboxStr(state.bbox))));
+function setBbox(b) { setArea({ kind: "bbox", bbox: b }); }
+
+function setArea(a) {
+  let b;
+  if (a.kind === "circle") b = pointToBbox(a.circle[1], a.circle[0], a.circle[2]);
+  else if (a.kind === "poly") {
+    const xs = a.poly.map((p) => p[0]), ys = a.poly.map((p) => p[1]);
+    b = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  } else b = a.bbox;
+  b = b.map(r3);
+  state.area = { ...a, bbox: b };
+  state.bbox = b;
+  [fields.w.value, fields.s.value, fields.e.value, fields.n.value] = b;
+  if (a.kind === "circle") { fields.lat.value = r3(a.circle[1]); fields.lon.value = r3(a.circle[0]); fields.km.value = r3(a.circle[2]); }
+  else { fields.lat.value = r3((b[1] + b[3]) / 2); fields.lon.value = r3((b[0] + b[2]) / 2); }
+  const desc = a.kind === "circle" ? `${r3(a.circle[2])} km around ${r3(a.circle[1])}, ${r3(a.circle[0])}`
+    : a.kind === "poly" ? `${a.poly.length} vertices` : bboxStr(b);
+  $("#area-readout").textContent = `${AREA_NAMES[a.kind]} ${desc} · ≈ ${fmt(shapeKm2(state.area), 0)} km²`;
+  document.querySelectorAll(".chip").forEach((ch) => ch.setAttribute("aria-pressed", String(a.kind === "bbox" && ch.dataset.bbox === bboxStr(b))));
 }
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   showFormError("");
-  let b = state.bbox;
+  let area = state.area;
   const m = mode();
   if (m === "bounds") {
+    let b;
     b = [fields.w, fields.s, fields.e, fields.n].map((f) => parseFloat(f.value));
     if (b.some((v) => !Number.isFinite(v))) return showFormError("Enter all four bounds: West, South, East, North.", [fields.w, fields.s, fields.e, fields.n].find((f) => !Number.isFinite(parseFloat(f.value))));
     const err = bboxError(b);
     if (err) return showFormError(err, fields.w);
+    area = { kind: "bbox", bbox: b };
   } else if (m === "point") {
     const lat = parseFloat(fields.lat.value), lon = parseFloat(fields.lon.value), km = parseFloat(fields.km.value);
     if (!Number.isFinite(lat) || lat < -90 || lat > 90) return showFormError("Latitude must be a number between −90 and 90.", fields.lat);
     if (!Number.isFinite(lon) || lon < -180 || lon > 180) return showFormError("Longitude must be a number between −180 and 180.", fields.lon);
     if (!Number.isFinite(km) || km <= 0 || km > 2000) return showFormError("Radius must be between 1 and 2000 km.", fields.km);
-    b = pointToBbox(lat, lon, km);
-  } else if (!b) {
-    return showFormError("Draw a rectangle on the map first, or switch to Bounds / Point + radius to type an area.");
+    area = { kind: "circle", circle: [lon, lat, km] };
+  } else if (!area) {
+    return showFormError("Draw a rectangle, polygon or circle on the map first, or switch to Bounds / Point + radius to type an area.");
   }
   const dErr = dateError();
   if (dErr) return showFormError(dErr.msg, dErr.field);
-  setBbox(b);
+  setArea(area);
   analyze();
 });
 
@@ -237,10 +323,13 @@ async function analyze({ fit = true } = {}) {
   state.from = fields.from.value; state.to = fields.to.value;
   const gen = ++state.gen;
   const bbox = bboxStr(state.bbox);
-  const params = { bbox, from: state.from, to: state.to };
+  const ap = areaParams();
+  const params = { ...ap, from: state.from, to: state.to };
   const apiQ = new URLSearchParams(location.search).get("api");
-  history.replaceState(null, "", "?" + (apiQ ? `api=${encodeURIComponent(apiQ)}&` : "") + `bbox=${bbox}&from=${state.from}&to=${state.to}`);
-  drawSelection(state.bbox, fit);
+  const url = new URLSearchParams(apiQ ? { api: apiQ } : {});
+  for (const [k, v] of Object.entries(params)) url.set(k, v);
+  history.replaceState(null, "", "?" + url.toString().replace(/%2C/g, ",").replace(/%3B/g, ";"));
+  drawSelection(state.area, fit);
   eventLayer.clearLayers();
 
   $("#empty").hidden = true;
@@ -261,22 +350,22 @@ async function analyze({ fit = true } = {}) {
 
   const calP = getJSON("/calendar", params).then(live((d) => { state.calendar = d; renderCalendar(); renderSummary(); }))
     .catch((e) => { fail("card-calendar")(e); fail("card-summary")(e); fail("card-season")(e); });
-  const curP = getJSON("/current", { bbox }).then(live((d) => { state.current = d; renderCurrent(d); return d; }))
+  const curP = getJSON("/current", ap).then(live((d) => { state.current = d; renderCurrent(d); return d; }))
     .catch((e) => { fail("card-current")(e); return null; });
 
   Promise.all([calP, curP]).then(() => { if (gen === state.gen && state.calendar) renderSeason(); });
   curP.then((cur) => {
     if (gen !== state.gen) return;
     const month = cur?.month ?? Number(state.to.split("-")[1]);
-    getJSON("/precedent", { bbox, month }).then(live(renderPrecedent)).catch(fail("card-precedent"));
+    getJSON("/precedent", { ...ap, month }).then(live(renderPrecedent)).catch(fail("card-precedent"));
   });
   getJSON("/cells", { ...params, limit: 5000 }).then(live(renderCells)).catch((e) => { if (gen === state.gen) { cellsLayer.clearLayers(); renderMapLegend(0); console.warn("cells:", e.message); } });
-  getJSON("/events", { bbox, from: monthStart(state.from), to: monthEnd(state.to), limit: 50 }).then(live(renderEvents)).catch(fail("card-events"));
+  getJSON("/events", { ...ap, from: monthStart(state.from), to: monthEnd(state.to), limit: 50 }).then(live(renderEvents)).catch(fail("card-events"));
 }
 
 function updateDownloads(params) {
   $("#dl-calendar").href = apiUrl("/calendar.csv", params);
-  $("#dl-hotspots").href = apiUrl("/csv", { bbox: params.bbox, from: monthStart(params.from), to: monthEnd(params.to) });
+  $("#dl-hotspots").href = apiUrl("/csv", { ...areaParams(), from: monthStart(params.from), to: monthEnd(params.to) });
 }
 
 // ───────────────────────── renderers ─────────────────────────
@@ -360,8 +449,34 @@ function renderCalendar() {
   host.innerHTML = svg;
   const tip = el("div", { id: "cal-tip", class: "tip", role: "tooltip", hidden: true });
   body("card-calendar").replaceChildren(host, tip);
+  renderHandoff(d.handoff);
   wireCalendar(host, tip, by, years);
   renderCalTable(d, years, by);
+}
+
+function renderHandoff(h) {
+  const box = $("#handoff");
+  if (!h) { box.hidden = true; return; }
+  const span = (a) => `${a[0]}–${a[1]}`;
+  const raw = state.calMode === "raw";
+  box.hidden = false;
+  box.classList.toggle("on", raw);
+  box.replaceChildren(
+    el("strong", { text: "Sensor handoff check. " }),
+    `Stitching the raw sensors together, ${span(h.after_years)} averages `,
+    el("strong", { class: "accent", text: fmtRatio(h.raw_jump) }),
+    ` the ${span(h.before_years)} level: that jump is MODIS → VIIRS, not more fire. Harmonized, it is `,
+    el("strong", { text: fmtRatio(h.harmonized_jump) }), ".",
+    raw ? "" : " ",
+    raw ? "" : el("button", { type: "button", class: "linkish", onclick: () => setCalMode("raw"), text: "Show raw sensors" }),
+  );
+}
+
+function setCalMode(m) {
+  state.calMode = m;
+  const r = document.querySelector(`input[name=calmode][value=${m}]`);
+  if (r) r.checked = true;
+  if (state.calendar) renderCalendar();
 }
 
 function wireCalendar(host, tip, by, years) {
@@ -376,7 +491,18 @@ function wireCalendar(host, tip, by, years) {
   const show = (r) => {
     const y = +r.dataset.y, m = +r.dataset.m, rec = by.get(`${y}-${m}`);
     const med = state.calendar.median_by_month?.[m] ?? state.calendar.median_by_month?.[String(m)];
-    tip.replaceChildren(...[
+    if (state.calMode === "raw") {
+      tip.replaceChildren(...[
+        el("div", {}, el("b", { text: `${MONTHS_LONG[m - 1]} ${y}` })),
+        rec && rec.raw != null
+          ? [
+            el("div", {}, el("b", { text: fmt(rec.raw) }), ` raw ${rec.raw_source === "modis" ? "MODIS" : "VIIRS"} cell-days${rec.partial ? " so far" : ""}`),
+            el("div", { class: "t-muted", text: `Harmonized: ${fmt(rec.value)}` }),
+            el("div", { class: "t-muted", text: rec.raw_source === "modis" ? "Not converted: MODIS sees fewer, larger pixels" : "VIIRS measured" }),
+          ]
+          : el("div", { class: "t-muted", text: "No data" }),
+      ].flat().filter(Boolean));
+    } else tip.replaceChildren(...[
       el("div", {}, el("b", { text: `${MONTHS_LONG[m - 1]} ${y}` })),
       rec && rec.value != null
         ? [
@@ -435,28 +561,29 @@ function wireCalendar(host, tip, by, years) {
 }
 
 function renderCalTable(d, years, by) {
+  const raw = state.calMode === "raw";
   const valueOf = (y, m) => {
     const r = by.get(`${y}-${m}`);
-    if (!r || r.value == null) return "–";
-    const v = state.calMode === "anomaly" ? (r.anomaly != null ? fmtRatio(r.anomaly) : "n/a") : fmt(r.value);
+    if (!r || calValue(r, state.calMode) == null) return "–";
+    const v = state.calMode === "anomaly" ? (r.anomaly != null ? fmtRatio(r.anomaly) : "n/a") : fmt(calValue(r, state.calMode));
     return r.partial ? `${v}†` : v;
   };
+  const caption = raw ? `Raw fire cell-days, not harmonized: MODIS before ${OVERLAP_START} (* rows), VIIRS after. † = month in progress (so far).`
+    : state.calMode === "anomaly" ? "Value ÷ monthly median. * = MODIS converted to VIIRS-equivalent. † = month in progress (provisional)."
+    : "Fire cell-days per month. * = MODIS converted to VIIRS-equivalent. † = month in progress (so far).";
   const t = el("table", { class: "data" },
-    el("caption", { text: state.calMode === "anomaly" ? "Value ÷ monthly median. * = MODIS converted to VIIRS-equivalent. † = month in progress (provisional)." : "Fire cell-days per month. * = MODIS converted to VIIRS-equivalent. † = month in progress (so far)." }),
+    el("caption", { text: caption }),
     el("thead", {}, el("tr", {}, el("th", { scope: "col", text: "Year" }), MONTHS.map((m) => el("th", { scope: "col", text: m })))),
     el("tbody", {}, years.map((y) => {
       const conv = d.months.some((r) => r.year === y && r.source === "modis_converted");
       return el("tr", {}, el("th", { scope: "row", text: `${y}${conv ? "*" : ""}` }),
-        Array.from({ length: 12 }, (_, i) => el("td", { title: cellLabel(y, i + 1, by.get(`${y}-${i + 1}`), d), text: valueOf(y, i + 1) })));
+        Array.from({ length: 12 }, (_, i) => el("td", { title: cellLabel(y, i + 1, by.get(`${y}-${i + 1}`), d, state.calMode), text: valueOf(y, i + 1) })));
     })),
   );
   $("#cal-table").replaceChildren(t);
 }
 
-document.querySelectorAll("input[name=calmode]").forEach((r) => r.addEventListener("change", (e) => {
-  state.calMode = e.target.value;
-  if (state.calendar) renderCalendar();
-}));
+document.querySelectorAll("input[name=calmode]").forEach((r) => r.addEventListener("change", (e) => setCalMode(e.target.value)));
 
 // seasonality -------------------------------------------------------------
 function renderSeason() {
@@ -558,7 +685,7 @@ $("#brief-btn").addEventListener("click", async () => {
   btn.disabled = true;
   setLoading("card-brief", "Writing briefing…");
   try {
-    const d = await getJSON("/brief", { bbox: bboxStr(state.bbox) });
+    const d = await getJSON("/brief", areaParams());
     if (gen !== state.gen) return;
     const kids = [el("p", { class: "brief-text", text: d.text || "(empty briefing)" })];
     kids.push(d.verified
@@ -576,7 +703,7 @@ $("#brief-btn").addEventListener("click", async () => {
 
 // downloads -------------------------------------------------------------
 const pngCal = () => svgToPng($("#calendar svg"), `firex_calendar_${bboxStr(state.bbox || [])}.png`,
-  `firex burning calendar · ${bboxStr(state.bbox || [])} · ${state.calMode === "anomaly" ? "anomaly vs. median" : "fire cell-days"}`).catch((e) => alert(e.message));
+  `firex burning calendar · ${bboxStr(state.bbox || [])} · ${state.calMode === "anomaly" ? "anomaly vs. median" : state.calMode === "raw" ? "raw sensors (not harmonized)" : "fire cell-days"}`).catch((e) => alert(e.message));
 const pngSeason = () => svgToPng($("#season svg"), `firex_seasonality_${bboxStr(state.bbox || [])}.png`,
   `firex seasonality · ${bboxStr(state.bbox || [])}`).catch((e) => alert(e.message));
 $("#png-calendar").addEventListener("click", pngCal);
@@ -585,7 +712,7 @@ $("#png-season").addEventListener("click", pngSeason);
 $("#dl-png-season").addEventListener("click", pngSeason);
 
 // validation -------------------------------------------------------------
-const METHOD_NAMES = { frp_strata: "FRP-stratified fit", ratio: "simple monthly ratio" };
+const METHOD_NAMES = { frp_strata: "FRP-stratified fit", ratio: "simple monthly ratio", quantile: "per-cell quantile mapping" };
 let validationKey = null;
 async function loadValidation(bbox) {
   const key = bbox || "";
@@ -617,16 +744,109 @@ async function loadValidation(bbox) {
       v.mape_monthly_pct != null ? row("Monthly error (MAPE)", v.mape_monthly_pct, bl?.mape_monthly_pct, (x) => `${fmt(x, 1)}%`) : null,
       v.r2 != null ? row("R² (monthly)", v.r2, bl?.r2, (x) => x.toFixed(2)) : null,
     ));
+    if (v.methods?.length > 1) {
+      const best = Math.min(...v.methods.map((m) => m.annual_abs_error_pct ?? Infinity));
+      const pct = (x) => (x == null ? "–" : `${fmt(x, 1)}%`);
+      kids.push(el("table", { class: "data methods" },
+        el("caption", { text: "Every method, fit on the same training years and scored on the same held-out years" }),
+        el("thead", {}, el("tr", {}, ["Method", "Annual error", "Monthly MAPE", "R²"].map((t) => el("th", { scope: "col", text: t })))),
+        el("tbody", {}, v.methods.map((m) => el("tr", { class: m.method === v.method ? "active" : null },
+          el("th", { scope: "row" }, METHOD_NAMES[m.method] || m.method, m.method === v.method ? el("span", { class: "pill", text: "in use" }) : null),
+          el("td", { class: m.annual_abs_error_pct === best ? "best" : null, text: pct(m.annual_abs_error_pct) }),
+          el("td", { text: pct(m.mape_monthly_pct) }),
+          el("td", { text: m.r2 == null ? "–" : m.r2.toFixed(2) }),
+        ))),
+      ));
+    }
     if (v.annual?.length) {
       const c = el("div", { style: "margin-top:10px" });
       c.innerHTML = validationSVG(v.annual);
       kids.push(c);
+    }
+    if (v.drift_from && v.annual?.some((r) => r.modis_drift?.length)) {
+      const sats = Object.entries(v.drift_from).map(([s, y]) => `${s} since ~${y}`).join(", ");
+      kids.push(el("p", { class: "note" }, el("strong", { text: "* MODIS orbit drift. " }),
+        `Terra and Aqua have been drifting to earlier overpass times (${sats}), so late-mission MODIS sees a cooler part of the daily fire cycle and fewer fires. `,
+        `The held-out years are drift years, which makes this test harder than the real use: the converted record (2001–${OVERLAP_START - 1}) predates the drift.`));
     }
     host.replaceChildren(...kids);
   } catch (e) {
     host.replaceChildren(el("div", { class: "state err", text: `Validation unavailable: ${e.message}` }));
   }
 }
+
+// ───────────────────────── alerts ─────────────────────────
+const alertForm = $("#alert-form");
+function alertLabel(a) {
+  if (a.name) return a.name;
+  const [k, v] = Object.entries(a.area || {})[0] || [];
+  if (k === "circle") { const [lon, lat, km] = v.split(","); return `${fmt(+km, 0)} km around ${lat}, ${lon}`; }
+  if (k === "poly") return `Polygon (${v.split(";").length} vertices)`;
+  return `Box ${v}`;
+}
+function alertStatus(st, threshold) {
+  if (!st) return el("span", { class: "badge warn", text: "Can't evaluate" });
+  const when = `${MONTHS[st.month - 1]} ${st.year}${st.partial ? " so far" : ""}`;
+  const r = st.ratio != null ? `${fmtRatio(st.ratio)} median` : st.value > 0 ? "fire, median 0" : "no fire";
+  return st.triggered
+    ? el("span", { class: "badge hot", text: `Triggered: ${r} · ${when}` })
+    : el("span", { class: "badge ok", text: `Below ${fmtRatio(threshold)}: ${r} · ${when}` });
+}
+function renderAlerts(list, notified = {}) {
+  const host = body("card-alerts");
+  if (!list.length) return host.replaceChildren(el("div", { class: "state", text: "No alerts yet. Pick an area, then subscribe above." }));
+  host.replaceChildren(el("ul", { class: "alerts" }, list.map((a) => el("li", {},
+    el("div", { class: "alert-main" },
+      el("strong", { text: alertLabel(a) }),
+      el("span", { class: "small muted", text: ` · at ${fmtRatio(a.threshold)} median${a.email ? ` · ${a.email}` : ""}${a.webhook ? " · webhook" : ""}${!a.email && !a.webhook ? " · in-app only" : ""}` }),
+    ),
+    el("div", { class: "alert-status" }, alertStatus(a.status, a.threshold),
+      notified[a.id]?.length ? el("span", { class: "small muted", text: ` Notified: ${notified[a.id].join(", ")}` }) : null),
+    el("div", { class: "alert-actions" },
+      el("button", { type: "button", class: "btn btn-ghost btn-sm", text: "Show", onclick: () => { const ar = parseAreaQuery(new URLSearchParams(a.area)); if (ar) { setArea(ar); analyze(); } } }),
+      el("button", { type: "button", class: "btn btn-ghost btn-sm", "aria-label": `Delete alert ${alertLabel(a)}`, text: "Delete",
+        onclick: async (e) => { e.currentTarget.disabled = true; try { await sendJSON("DELETE", `/alerts/${a.id}`); } catch (err) { $("#alert-error").textContent = err.message; } loadAlerts(); } }),
+    ),
+  ))));
+}
+async function loadAlerts() {
+  if (!state.health?.data_ready) return setEmpty("card-alerts", "Alerts need harmonized data.");
+  setLoading("card-alerts");
+  try { renderAlerts((await getJSON("/alerts")).alerts || []); } catch (e) { setError("card-alerts", e); }
+}
+alertForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("#alert-error").textContent = "";
+  if (!state.area) { $("#alert-error").textContent = "Pick an area first."; return; }
+  const btn = alertForm.querySelector("button[type=submit]");
+  btn.disabled = true;
+  try {
+    await sendJSON("POST", "/alerts", {
+      ...areaParams(), threshold: parseFloat($("#a-threshold").value),
+      name: $("#a-name").value.trim() || null, email: $("#a-email").value.trim() || null, webhook: $("#a-webhook").value.trim() || null,
+    });
+    alertForm.reset();
+    loadAlerts();
+  } catch (err) {
+    $("#alert-error").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#alerts-check").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  setLoading("card-alerts", "Checking…");
+  try {
+    const res = (await sendJSON("POST", "/alerts/check")).results || [];
+    const notified = Object.fromEntries(res.map((r) => [r.alert.id, r.notified || []]));
+    renderAlerts(res.map((r) => ({ ...r.alert, status: r.status ?? null })), notified);
+  } catch (err) {
+    setError("card-alerts", err);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // ───────────────────────── boot ─────────────────────────
 function showBanner(html, err = false) {
@@ -646,7 +866,7 @@ async function loadRegions() {
       type: "button", class: "chip", "aria-pressed": "false", "data-bbox": bboxStr(r.bbox), text: r.name,
       onclick: () => { setBbox(r.bbox); showFormError(""); analyze(); },
     })));
-    if (state.bbox) setBbox(state.bbox); // refresh pressed state
+    if (state.area) setArea(state.area); // refresh pressed state
   } catch (e) {
     host.replaceChildren(el("span", { class: "small muted", text: e.status === 404 ? "No presets available." : "Presets unavailable." }));
   }
@@ -654,7 +874,7 @@ async function loadRegions() {
 
 async function boot() {
   const q = new URLSearchParams(location.search);
-  const urlBbox = parseBbox(q.get("bbox"));
+  const urlArea = parseAreaQuery(q);
   const urlFrom = validYM(q.get("from")) ? q.get("from") : null;
   const urlTo = validYM(q.get("to")) ? q.get("to") : null;
 
@@ -664,7 +884,7 @@ async function boot() {
   } catch (e) {
     $("#coverage").innerHTML = `<span class="dot bad"></span>API offline`;
     showBanner(`Can't reach the firex API at <code>${API.replace(/</g, "&lt;")}</code>. Start it with <code>uvicorn backend.app.main:app --port 8000</code>, or pass <code>?api=URL</code>.`, true);
-    if (urlBbox) { setBbox(urlBbox); drawSelection(urlBbox); }
+    if (urlArea) { setArea(urlArea); drawSelection(state.area); }
     fields.from.value = urlFrom || "2001-01"; fields.to.value = urlTo || nowYM();
     return;
   }
@@ -690,11 +910,12 @@ async function boot() {
   }
 
   loadRegions();
-  if (!urlBbox) loadValidation();
-  if (urlBbox && !bboxError(urlBbox)) {
-    setBbox(urlBbox);
+  loadAlerts();
+  if (!urlArea) loadValidation();
+  if (urlArea) {
+    setArea(urlArea);
     if (health.data_ready) analyze();
-    else drawSelection(urlBbox);
+    else drawSelection(state.area);
   }
 }
 
