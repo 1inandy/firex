@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "axis": {
+      "url": "https://useaxis.dev/api/mcp"
+    }
+  }
+}

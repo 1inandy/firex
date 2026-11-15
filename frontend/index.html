@@ -1,0 +1,83 @@
+<!doctype html>
+<!-- Starter UI: draw a box → fetch /calendar → year×month heatmap. Jobs 9–11 replace/extend this. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>firex: burning calendar</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+  <style>
+    body { margin: 0; font: 14px/1.4 system-ui, sans-serif; display: grid; grid-template-columns: 1fr 1fr; height: 100vh; }
+    #map { height: 100%; }
+    #panel { padding: 16px; overflow: auto; }
+    table { border-collapse: collapse; font-size: 11px; }
+    td, th { width: 28px; height: 18px; text-align: center; }
+    td { color: transparent; } td:hover { color: #000; outline: 1px solid #000; }
+    .legend { margin-top: 8px; color: #555; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel">
+    <h2>🔥 firex: burning calendar</h2>
+    <p>Draw a rectangle on the map. Colors = harmonized fire cell-days per month (viridis).</p>
+    <label><input type="checkbox" id="anom" /> Show anomaly vs. monthly median</label>
+    <div id="status"></div>
+    <div id="cal"></div>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+  <script>
+    const API = new URLSearchParams(location.search).get("api") || "http://localhost:8000";
+    const map = L.map("map").setView([37, -119.5], 6);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
+    const drawn = new L.FeatureGroup().addTo(map);
+    map.addControl(new L.Control.Draw({ draw: { polygon: false, polyline: false, circle: false, marker: false, circlemarker: false }, edit: { featureGroup: drawn } }));
+    let last = null;
+
+    // viridis stops
+    const V = ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"];
+    const D = ["#2166ac", "#67a9cf", "#f7f7f7", "#ef8a62", "#b2182b"]; // diverging
+    const pick = (stops, t) => stops[Math.max(0, Math.min(stops.length - 1, Math.round(t * (stops.length - 1))))];
+
+    map.on(L.Draw.Event.CREATED, async (e) => {
+      drawn.clearLayers(); drawn.addLayer(e.layer);
+      const b = e.layer.getBounds();
+      const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(v => v.toFixed(3)).join(",");
+      history.replaceState(null, "", `?bbox=${bbox}`);
+      document.getElementById("status").textContent = "Loading…";
+      try {
+        const r = await fetch(`${API}/calendar?bbox=${bbox}`);
+        if (!r.ok) throw new Error((await r.json()).detail || r.status);
+        last = await r.json(); render();
+        document.getElementById("status").textContent = "";
+      } catch (err) { document.getElementById("status").textContent = "Error: " + err.message; }
+    });
+    document.getElementById("anom").onchange = render;
+
+    function render() {
+      if (!last) return;
+      const anom = document.getElementById("anom").checked;
+      const by = {}; let max = 0;
+      for (const m of last.months) { (by[m.year] ||= {})[m.month] = m; max = Math.max(max, m.value); }
+      const months = "JFMAMJJASOND".split("");
+      let html = "<table><tr><th></th>" + months.map(m => `<th>${m}</th>`).join("") + "</tr>";
+      for (const y of Object.keys(by).sort()) {
+        html += `<tr><th>${y}</th>`;
+        for (let mo = 1; mo <= 12; mo++) {
+          const c = by[y][mo];
+          if (!c) { html += "<td style='background:#eee'></td>"; continue; }
+          const color = anom
+            ? pick(D, c.anomaly == null ? 0.5 : Math.min(1, Math.log2(Math.max(c.anomaly, 0.01)) / 4 + 0.5))
+            : pick(V, max ? c.value / max : 0);
+          const tip = `${y}-${mo}: ${c.value.toFixed(1)} (${c.source})${c.anomaly != null ? `, ${c.anomaly}× median` : ""}`;
+          html += `<td title="${tip}" style="background:${color}">${Math.round(c.value)}</td>`;
+        }
+        html += "</tr>";
+      }
+      document.getElementById("cal").innerHTML = html + "</table><div class='legend'>Hover a cell for details. Grey = no data.</div>";
+    }
+  </script>
+</body>
+</html>

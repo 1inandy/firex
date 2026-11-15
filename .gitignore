@@ -1,0 +1,16 @@
+# data (FIRMS downloads + derived parquet are large; regenerate with the pipeline)
+data/*
+!data/.gitkeep
+# env / secrets
+.env
+.env.local
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+# node
+node_modules/
+dist/
+.DS_Store
