@@ -39,7 +39,14 @@ Live board: https://useaxis.dev/team/board
 
 ### 3. Run things
 ```bash
-# pipeline tests
+# no FIRMS data yet? build a clearly-labelled synthetic FIRMS-format dataset (California + Gran Chaco)
+python -m pipeline.demo                  # -> data/raw/demo/*.csv.gz (~5 s)
+python -m pipeline.run data/raw/demo     # clean -> grid -> harmonize -> events -> validate (~5 s)
+# real data: drop FIRMS archive CSVs (MODIS SP + VIIRS SNPP SP) in data/raw/<region>/ and
+python -m pipeline.run data/raw/<region>
+# pitch figures (before/after harmonization, held-out validation) -> data/figures/*.svg
+python -m pipeline.figures
+# tests
 python -m pytest -q
 # API (http://localhost:8000/docs)
 uvicorn backend.app.main:app --reload
@@ -58,3 +65,15 @@ data/       local data, gitignored
 
 ## Credits
 Data: NASA FIRMS (MODIS C6.1, VIIRS 375 m). Response-copilot ideas inspired by ContainOS (TreeHacks 2026).
+
+## How the harmonization works
+1. **Clean** (`pipeline/clean.py`): keep vegetation fires (`type == 0`), MODIS confidence ≥ 30, VIIRS nominal/high; drop exact duplicates and swath-edge "bow-tie" repeats (same satellite + overpass, closer than one pixel).
+2. **Grid** (`pipeline/grid.py`): snap to 0.05° cells and count **fire cell-days** (cells with ≥ 1 detection per day), per sensor family. The VIIRS family is Suomi NPP only, so adding NOAA-20/21 later doesn't inflate the record.
+3. **Convert** (`pipeline/harmonize.py`): on the overlap years (2012→) fit, per region and calendar month,
+   `VIIRS ≈ a·MODIS_weak + b·MODIS_strong` (strong = cell-day max FRP ≥ 30 MW). VIIRS adds far more detections around small/weak fires than around big ones, so this follows each year's fire mix; the plain `VIIRS ÷ MODIS` ratio is kept as the baseline.
+4. **Validate**: fit on 2012–2020, predict 2021→ from MODIS alone, compare with real VIIRS (`/validation`, `data/figures/*_validation.svg`).
+5. **Series**: 2001–2011 = converted MODIS with a 10–90% band; 2012→ = VIIRS.
+
+Settings live in `pipeline/config.py`. API contract: [docs/api.md](docs/api.md). `/brief` uses Claude when `ANTHROPIC_API_KEY` is set (template otherwise); every number in it is checked against the computed facts.
+
+> **Demo data is synthetic.** `pipeline.demo` simulates FIRMS-format detections so the app runs end to end; the UI shows a banner whenever it's in use. Validation numbers on synthetic data say the code works, not that the method does: rerun on real FIRMS archives before quoting them.
