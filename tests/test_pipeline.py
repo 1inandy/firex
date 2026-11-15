@@ -8,7 +8,8 @@ from pipeline import config
 from pipeline.clean import clean, swath_duplicates
 from pipeline.events import build_events
 from pipeline.grid import monthly_cell_days, to_grid
-from pipeline.harmonize import fit_monthly_ratio, fit_regional_ratios, harmonize, region_for_bbox, validate
+from pipeline.harmonize import (drift_flag, fit_monthly_ratio, fit_regional_ratios, harmonize, raw_series,
+                                region_for_bbox, validate)
 
 
 def synthetic(seed=0):
@@ -90,6 +91,56 @@ def test_regional_ratios_and_lookup():
     assert set(r.region) == {"socal", "global"}
     assert region_for_bbox((-119, 34, -118, 35), regions) == "socal"
     assert region_for_bbox((0, 0, 1, 1), regions) == "global"
+
+
+def _qm_monthly(seed=2, years=range(2008, 2024), n=60, extra=30):
+    """Per-cell months: each MODIS cell with k fire days is seen by VIIRS on 2k days, plus `extra`
+    cells per month that only VIIRS sees (1 day each)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for year in years:
+        ks = rng.integers(1, 9, n)
+        for i, k in enumerate(ks):
+            cell = dict(cell_id=f"c{year}_{i}", lat=0.0, lon=i * 0.05, year=year, month=8, strong_cell_days=0)
+            rows.append({**cell, "family": "MODIS", "fire_cell_days": int(k)})
+            if year >= config.OVERLAP_START_YEAR:
+                rows.append({**cell, "family": "VIIRS", "fire_cell_days": int(2 * k)})
+        if year >= config.OVERLAP_START_YEAR:
+            rows += [dict(cell_id=f"x{year}_{j}", lat=1.0, lon=j * 0.05, year=year, month=8, family="VIIRS",
+                          fire_cell_days=1, strong_cell_days=0) for j in range(extra)]
+    return pd.DataFrame(rows)
+
+
+def test_quantile_mapping_is_per_cell_and_transfers_to_small_areas():
+    monthly = _qm_monthly()
+    r = fit_monthly_ratio(monthly).set_index("month")
+    curve = r.loc[8, [f"qm_{k}" for k in range(1, 9)]].to_numpy(float)
+    assert (np.diff(curve) >= 0).all()  # monotone
+    v = validate(monthly, train_end=2019, method="quantile")
+    assert v["method"] == "quantile" and {m["method"] for m in v["methods"]} == {"ratio", "frp_strata", "quantile"}
+    assert v["mape_monthly_pct"] < 10
+    # A curve fit on the whole region, applied to a 10-cell "drawn area" in a MODIS-only year:
+    small = monthly[(monthly.year == 2009) & monthly.cell_id.isin([f"c2009_{i}" for i in range(10)])]
+    h = harmonize(small, fit_monthly_ratio(monthly), method="quantile")
+    truth = 2 * small.fire_cell_days.sum() * 1.5 * 0.85  # VIIRS 2k, ×1.5 more active cells, minus the 1-day extras
+    assert h.fire_cell_days.iloc[0] == pytest.approx(truth, rel=0.35)
+    assert h.fire_cell_days.iloc[0] < 0.5 * harmonize(monthly[monthly.year == 2009], fit_monthly_ratio(monthly),
+                                                      method="quantile").fire_cell_days.iloc[0]
+
+
+def test_quantile_falls_back_without_cells():
+    monthly = monthly_cell_days(to_grid(clean(synthetic())))
+    agg = monthly.drop(columns="cell_id")
+    h = harmonize(agg, fit_monthly_ratio(monthly), method="quantile")  # no cell_id: FRP fit instead
+    assert h[h.year == 2005].fire_cell_days.tolist() == pytest.approx([30.0, 30.0])
+
+
+def test_raw_series_stitches_sensors_and_drift_flag():
+    monthly = monthly_cell_days(to_grid(clean(synthetic())))
+    raw = raw_series(monthly).set_index(["year", "month"])
+    assert raw.loc[(2005, 1)].tolist() == [10.0, "modis"]
+    assert raw.loc[(2013, 7)].tolist() == [30.0, "viirs"]
+    assert drift_flag(2019) == [] and drift_flag(2021) == ["Terra"] and drift_flag(2023) == ["Terra", "Aqua"]
 
 
 def test_events_link_adjacent_cells_across_days():
