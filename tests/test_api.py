@@ -106,3 +106,13 @@ def test_brief_verifier_flags_invented_numbers():
     assert bad == []
     marked, bad = brief.verify("About 55% more than 2019.", facts)
     assert bad == ["55", "2019"] and "[unverified]" in marked
+
+
+def test_parallel_requests_do_not_collide(demo_data):
+    """Routes run in a thread pool; a shared duckdb connection used to fail with 'connection is busy'."""
+    from concurrent.futures import ThreadPoolExecutor
+    paths = [("/calendar", {"bbox": CA}), ("/current", {"bbox": CA}), ("/cells", {"bbox": CA}),
+             ("/events", {"bbox": CA}), ("/precedent", {"bbox": CA, "month": 8})] * 6
+    with ThreadPoolExecutor(12) as ex:
+        codes = list(ex.map(lambda p: demo_data.get(p[0], params=p[1]).status_code, paths))
+    assert set(codes) == {200}

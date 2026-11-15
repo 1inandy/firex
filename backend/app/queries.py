@@ -21,6 +21,13 @@ class NoData(Exception):
     pass
 
 
+def sql(query: str, args: list) -> pd.DataFrame:
+    """Run a query on a fresh in-memory connection. FastAPI serves sync routes from a thread pool, and
+    duckdb's module-level default connection can't run two queries at once."""
+    with duckdb.connect() as con:
+        return con.execute(query, args).df()
+
+
 def _path(name: str):
     return {"monthly": config.GRID / "monthly.parquet", "hotspots": config.GRID / "hotspots.parquet",
             "cells_daily": config.GRID / "cells_daily.parquet", "events": config.GRID / "events.parquet",
@@ -52,8 +59,8 @@ def _bbox_args(b: Bbox) -> list[float]:
 
 
 def load_monthly(b: Bbox) -> pd.DataFrame:
-    return duckdb.execute(f"SELECT * FROM read_parquet(?) WHERE {_bbox_sql()}",
-                          [_require("monthly"), *_bbox_args(b)]).df()
+    return sql(f"SELECT * FROM read_parquet(?) WHERE {_bbox_sql()}",
+                          [_require("monthly"), *_bbox_args(b)])
 
 
 def load_ratios(b: Bbox) -> pd.DataFrame | None:
@@ -158,10 +165,10 @@ def months_payload(h: pd.DataFrame) -> list[dict]:
 
 def _window_cell_days(b: Bbox, month: int, last_day: int) -> pd.DataFrame:
     """Per-year family totals for days 1..last_day of `month` (fair comparison for a partial month)."""
-    g = duckdb.execute(
+    g = sql(
         f"SELECT cell_id, lat, lon, date, sensor, frp_max FROM read_parquet(?) WHERE {_bbox_sql()} "
         "AND month(date) = ? AND day(date) <= ?",
-        [_require("cells_daily"), *_bbox_args(b), month, last_day]).df()
+        [_require("cells_daily"), *_bbox_args(b), month, last_day])
     return g
 
 
@@ -230,13 +237,13 @@ def current(b: Bbox, today: dt.date | None = None) -> dict:
 # ---------- map cells ----------
 
 def cells(b: Bbox, start: int, end: int, limit: int) -> list[dict]:
-    df = duckdb.execute(
+    df = sql(
         f"""SELECT lat, lon, SUM(v) AS cell_days FROM (
               SELECT cell_id, lat, lon, year, month, MAX(fire_cell_days) AS v FROM read_parquet(?)
               WHERE {_bbox_sql()} AND year * 12 + month BETWEEN ? AND ?
               GROUP BY cell_id, lat, lon, year, month)
             GROUP BY lat, lon ORDER BY cell_days DESC LIMIT ?""",
-        [_require("monthly"), *_bbox_args(b), start, end, limit]).df()
+        [_require("monthly"), *_bbox_args(b), start, end, limit])
     return [{"lat": round(float(r.lat), 4), "lon": round(float(r.lon), 4), "cell_days": int(r.cell_days)}
             for r in df.itertuples()]
 
@@ -251,8 +258,8 @@ def _event_dict(r) -> dict:
 
 
 def load_events(b: Bbox) -> pd.DataFrame:
-    return duckdb.execute(f"SELECT * FROM read_parquet(?) WHERE {_bbox_sql()}",
-                          [_require("events"), *_bbox_args(b)]).df()
+    return sql(f"SELECT * FROM read_parquet(?) WHERE {_bbox_sql()}",
+                          [_require("events"), *_bbox_args(b)])
 
 
 def events(b: Bbox, start: str, end: str, limit: int) -> list[dict]:

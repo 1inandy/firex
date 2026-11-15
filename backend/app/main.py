@@ -4,7 +4,6 @@ from __future__ import annotations
 import datetime as dt
 import io
 
-import duckdb
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -108,10 +107,10 @@ def current(bbox: str):
 def csv(bbox: str, start: str = Query(..., alias="from"), end: str = Query(..., alias="to")):
     """Cleaned hotspots for an area and date range (YYYY-MM-DD)."""
     b = parse_bbox(bbox)
-    df = duckdb.execute(
+    df = q.sql(
         f"SELECT * FROM read_parquet(?) WHERE {q._bbox_sql('latitude', 'longitude')} "
         "AND acq_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE) ORDER BY acq_date, acq_time",
-        [q._require("hotspots"), *q._bbox_args(b), day(start), day(end)]).df()
+        [q._require("hotspots"), *q._bbox_args(b), day(start), day(end)])
     return _csv(df, "firex_hotspots.csv")
 
 

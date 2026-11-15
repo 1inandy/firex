@@ -46,6 +46,7 @@ Latest month vs. history for the same calendar month.
  "source": "archive"}
 ```
 - `highest_since`: most recent earlier year whose same month was higher; null if this is the record. Only meaningful when `ratio > 1`.
+- When the month is partial, `value` and `median` both cover days 1–`days_covered` only (same days of past years), so the comparison is fair.
 - `rank`: 1 = highest of `n_years` for that calendar month. `partial` = month not finished.
 - `source`: `"nrt"` (live FIRMS) or `"archive"`.
 
