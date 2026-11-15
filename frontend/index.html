@@ -1,83 +1,180 @@
 <!doctype html>
-<!-- Starter UI: draw a box → fetch /calendar → year×month heatmap. Jobs 9–11 replace/extend this. -->
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>firex: burning calendar</title>
+  <title>firex · burning calendar</title>
+  <meta name="description" content="25 years of MODIS and VIIRS fire hotspots merged into one harmonized record. Pick any area and see its burning calendar." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
-  <style>
-    body { margin: 0; font: 14px/1.4 system-ui, sans-serif; display: grid; grid-template-columns: 1fr 1fr; height: 100vh; }
-    #map { height: 100%; }
-    #panel { padding: 16px; overflow: auto; }
-    table { border-collapse: collapse; font-size: 11px; }
-    td, th { width: 28px; height: 18px; text-align: center; }
-    td { color: transparent; } td:hover { color: #000; outline: 1px solid #000; }
-    .legend { margin-top: 8px; color: #555; }
-  </style>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div id="map"></div>
-  <div id="panel">
-    <h2>🔥 firex: burning calendar</h2>
-    <p>Draw a rectangle on the map. Colors = harmonized fire cell-days per month (viridis).</p>
-    <label><input type="checkbox" id="anom" /> Show anomaly vs. monthly median</label>
-    <div id="status"></div>
-    <div id="cal"></div>
-  </div>
+  <a class="skip" href="#analysis">Skip to analysis</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">firex</span>
+      <span class="brand-sub">Harmonized MODIS + VIIRS fire record, 2001 to now</span>
+    </div>
+    <div class="topbar-meta" id="coverage" aria-live="polite"></div>
+  </header>
+
+  <div id="banner" class="banner" role="status" hidden></div>
+
+  <main class="layout">
+    <!-- ───────────── Left: area picker + map ───────────── -->
+    <section class="left" aria-label="Area and date range">
+      <form id="area-form" class="controls" novalidate>
+        <div class="ctrl-row">
+          <span class="ctrl-label" id="presets-label">Quick pick</span>
+          <div id="presets" class="chips" role="group" aria-labelledby="presets-label">
+            <span class="muted small">Loading regions…</span>
+          </div>
+        </div>
+
+        <fieldset class="ctrl-row area-mode">
+          <legend class="ctrl-label">Area</legend>
+          <div class="seg" role="radiogroup" aria-label="How to choose the area">
+            <label><input type="radio" name="mode" value="draw" checked /> <span>Draw</span></label>
+            <label><input type="radio" name="mode" value="bounds" /> <span>Bounds</span></label>
+            <label><input type="radio" name="mode" value="point" /> <span>Point + radius</span></label>
+          </div>
+        </fieldset>
+
+        <div class="mode-pane" data-mode="draw">
+          <p class="small muted">Use the <strong>rectangle tool</strong> on the map (top-left), or switch to Bounds / Point to type coordinates.</p>
+        </div>
+        <div class="mode-pane fields4" data-mode="bounds" hidden>
+          <label>West <input id="f-w" type="number" step="any" min="-180" max="180" inputmode="decimal" /></label>
+          <label>South <input id="f-s" type="number" step="any" min="-90" max="90" inputmode="decimal" /></label>
+          <label>East <input id="f-e" type="number" step="any" min="-180" max="180" inputmode="decimal" /></label>
+          <label>North <input id="f-n" type="number" step="any" min="-90" max="90" inputmode="decimal" /></label>
+        </div>
+        <div class="mode-pane fields3" data-mode="point" hidden>
+          <label>Latitude <input id="f-lat" type="number" step="any" min="-90" max="90" inputmode="decimal" /></label>
+          <label>Longitude <input id="f-lon" type="number" step="any" min="-180" max="180" inputmode="decimal" /></label>
+          <label>Radius km <input id="f-km" type="number" step="any" min="1" max="2000" value="50" inputmode="decimal" /></label>
+        </div>
+
+        <div class="ctrl-row dates">
+          <label>From <input id="f-from" type="month" min="2001-01" required /></label>
+          <label>To <input id="f-to" type="month" min="2001-01" required /></label>
+          <button type="submit" class="btn btn-primary">Analyze area</button>
+        </div>
+        <p id="form-error" class="form-error" role="alert"></p>
+        <div class="ctrl-row area-readout">
+          <span id="area-readout" class="small muted">No area selected.</span>
+          <label class="toggle small"><input type="checkbox" id="cells-toggle" checked /> Fire cells on map</label>
+        </div>
+      </form>
+      <div id="map" role="region" aria-label="Map. Draw a rectangle to choose an area; coordinates can also be typed above."></div>
+    </section>
+
+    <!-- ───────────── Right: analysis ───────────── -->
+    <section id="analysis" class="right" aria-label="Analysis" tabindex="-1">
+      <div id="empty" class="empty">
+        <h1>Pick an area to see its burning calendar</h1>
+        <p>Draw a rectangle on the map, type coordinates, or choose a quick pick. firex merges MODIS (2001→) and VIIRS (2012→) fire detections into one VIIRS-equivalent record of <em>fire cell-days</em>: the number of 0.05° grid cells with a vegetation fire on a given day.</p>
+      </div>
+
+      <div id="cards" hidden>
+        <div class="grid2">
+          <article class="card" id="card-current" aria-labelledby="h-current">
+            <header class="card-h"><h2 id="h-current">This month vs. history</h2><span class="pill" id="current-source"></span></header>
+            <div class="card-body" aria-live="polite"></div>
+          </article>
+          <article class="card" id="card-precedent" aria-labelledby="h-precedent">
+            <header class="card-h"><h2 id="h-precedent">Precedent</h2></header>
+            <div class="card-body" aria-live="polite"></div>
+          </article>
+        </div>
+
+        <article class="card" id="card-calendar" aria-labelledby="h-calendar">
+          <header class="card-h">
+            <h2 id="h-calendar">Burning calendar</h2>
+            <div class="card-tools">
+              <div class="seg seg-sm" role="radiogroup" aria-label="Calendar color">
+                <label><input type="radio" name="calmode" value="counts" checked /> <span>Counts</span></label>
+                <label><input type="radio" name="calmode" value="anomaly" /> <span>Anomaly vs. median</span></label>
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm" id="png-calendar">PNG</button>
+            </div>
+          </header>
+          <p class="card-sub">Fire cell-days per month (VIIRS-equivalent). Hover or focus a cell; use arrow keys to move.</p>
+          <div class="card-body cal-wrap">
+            <div id="calendar"></div>
+            <div id="cal-tip" class="tip" role="tooltip" hidden></div>
+          </div>
+          <details class="table-fallback">
+            <summary>Show calendar as a table</summary>
+            <div id="cal-table" class="table-scroll"></div>
+          </details>
+        </article>
+
+        <article class="card" id="card-season" aria-labelledby="h-season">
+          <header class="card-h">
+            <h2 id="h-season">Seasonality</h2>
+            <div class="card-tools"><button type="button" class="btn btn-ghost btn-sm" id="png-season">PNG</button></div>
+          </header>
+          <p class="card-sub">Typical year (median, 10–90% band across years) with the latest year drawn on top.</p>
+          <div class="card-body"></div>
+        </article>
+
+        <article class="card" id="card-summary" aria-labelledby="h-summary">
+          <header class="card-h"><h2 id="h-summary">Insights</h2></header>
+          <div class="card-body"></div>
+        </article>
+
+        <article class="card" id="card-events" aria-labelledby="h-events">
+          <header class="card-h"><h2 id="h-events">Largest fire events</h2><span class="small muted" id="events-count"></span></header>
+          <p class="card-sub">Hotspots clustered into fires (adjacent cells, a few days apart). Select one to show it on the map.</p>
+          <div class="card-body"></div>
+        </article>
+
+        <article class="card" id="card-brief" aria-labelledby="h-brief">
+          <header class="card-h">
+            <h2 id="h-brief">Briefing</h2>
+            <button type="button" class="btn btn-primary btn-sm" id="brief-btn">Generate briefing</button>
+          </header>
+          <p class="card-sub">Plain-language summary for a fire manager. Every number is checked against the computed data.</p>
+          <div class="card-body" aria-live="polite"></div>
+        </article>
+
+        <article class="card" id="card-downloads" aria-labelledby="h-downloads">
+          <header class="card-h"><h2 id="h-downloads">Downloads</h2></header>
+          <div class="card-body dl-row">
+            <a class="btn btn-ghost" id="dl-calendar" href="#" download>Calendar CSV</a>
+            <a class="btn btn-ghost" id="dl-hotspots" href="#" download>Hotspots CSV</a>
+            <button type="button" class="btn btn-ghost" id="dl-png-cal">Calendar PNG</button>
+            <button type="button" class="btn btn-ghost" id="dl-png-season">Seasonality PNG</button>
+          </div>
+        </article>
+      </div>
+
+      <details class="card how" id="card-validation">
+        <summary><h2>How we harmonize, and how well it works</h2></summary>
+        <div class="how-text">
+          <p><strong>Clean.</strong> We keep vegetation fires only (FIRMS type 0), drop low-confidence detections (MODIS confidence &lt; 30, VIIRS “low”), and remove duplicates.</p>
+          <p><strong>Grid.</strong> Detections are counted as <em>fire cell-days</em>: a 0.05° cell (~5.5 km) that burned on a given day counts once, whichever sensor saw it. This blunts the resolution gap between MODIS (1 km) and VIIRS (375 m).</p>
+          <p id="how-ratio"><strong>Learn the conversion.</strong> On the overlap years (2012 onward) we fit, for each calendar month, how many VIIRS cell-days each MODIS cell-day is worth, separately for weak and strong (high-FRP) MODIS detections. VIIRS’ finer pixels add far more detections around small, weak fires than around big intense ones, so one flat ratio would overstate big-wildfire years. A simple monthly ratio is kept as a baseline for comparison.</p>
+          <p><strong>Convert.</strong> MODIS-only years (2001–2011) are converted with that monthly fit, so the whole record reads in VIIRS-equivalent units. Converted months carry a 10–90% uncertainty band in the calendar tooltips.</p>
+        </div>
+        <div id="validation" class="card-body" aria-live="polite"></div>
+      </details>
+
+      <footer class="foot small muted">
+        Data: NASA FIRMS (MODIS C6.1, VIIRS 375 m). Basemap © Esri, HERE, Garmin, © OpenStreetMap contributors. NASA Space Apps 2026.
+      </footer>
+    </section>
+  </main>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
-  <script>
-    const API = new URLSearchParams(location.search).get("api") || "http://localhost:8000";
-    const map = L.map("map").setView([37, -119.5], 6);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
-    const drawn = new L.FeatureGroup().addTo(map);
-    map.addControl(new L.Control.Draw({ draw: { polygon: false, polyline: false, circle: false, marker: false, circlemarker: false }, edit: { featureGroup: drawn } }));
-    let last = null;
-
-    // viridis stops
-    const V = ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"];
-    const D = ["#2166ac", "#67a9cf", "#f7f7f7", "#ef8a62", "#b2182b"]; // diverging
-    const pick = (stops, t) => stops[Math.max(0, Math.min(stops.length - 1, Math.round(t * (stops.length - 1))))];
-
-    map.on(L.Draw.Event.CREATED, async (e) => {
-      drawn.clearLayers(); drawn.addLayer(e.layer);
-      const b = e.layer.getBounds();
-      const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].map(v => v.toFixed(3)).join(",");
-      history.replaceState(null, "", `?bbox=${bbox}`);
-      document.getElementById("status").textContent = "Loading…";
-      try {
-        const r = await fetch(`${API}/calendar?bbox=${bbox}`);
-        if (!r.ok) throw new Error((await r.json()).detail || r.status);
-        last = await r.json(); render();
-        document.getElementById("status").textContent = "";
-      } catch (err) { document.getElementById("status").textContent = "Error: " + err.message; }
-    });
-    document.getElementById("anom").onchange = render;
-
-    function render() {
-      if (!last) return;
-      const anom = document.getElementById("anom").checked;
-      const by = {}; let max = 0;
-      for (const m of last.months) { (by[m.year] ||= {})[m.month] = m; max = Math.max(max, m.value); }
-      const months = "JFMAMJJASOND".split("");
-      let html = "<table><tr><th></th>" + months.map(m => `<th>${m}</th>`).join("") + "</tr>";
-      for (const y of Object.keys(by).sort()) {
-        html += `<tr><th>${y}</th>`;
-        for (let mo = 1; mo <= 12; mo++) {
-          const c = by[y][mo];
-          if (!c) { html += "<td style='background:#eee'></td>"; continue; }
-          const color = anom
-            ? pick(D, c.anomaly == null ? 0.5 : Math.min(1, Math.log2(Math.max(c.anomaly, 0.01)) / 4 + 0.5))
-            : pick(V, max ? c.value / max : 0);
-          const tip = `${y}-${mo}: ${c.value.toFixed(1)} (${c.source})${c.anomaly != null ? `, ${c.anomaly}× median` : ""}`;
-          html += `<td title="${tip}" style="background:${color}">${Math.round(c.value)}</td>`;
-        }
-        html += "</tr>";
-      }
-      document.getElementById("cal").innerHTML = html + "</table><div class='legend'>Hover a cell for details. Grey = no data.</div>";
-    }
-  </script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
