@@ -155,7 +155,8 @@ def test_raw_series_and_handoff(demo_data):
     m = cal["months"]
     assert {x["raw_source"] for x in m if x["year"] < 2012} == {"modis"}
     assert {x["raw_source"] for x in m if x["year"] >= 2012} == {"viirs"}  # S-NPP observed every month here
-    assert all(x["observed"] == 1.0 for x in m)  # quiet synthetic days are not mistaken for outages
+    # Quiet synthetic days are not mistaken for outages; only Jan 2012 is partial (S-NPP starts on the 20th).
+    assert [(x["year"], x["month"]) for x in m if x["observed"] < 1] == [(2012, 1)]
     ho = cal["handoff"]
     assert ho["before_years"] == [2009, 2011] and ho["after_years"] == [2012, 2014]
     assert abs(ho["harmonized_jump"] - 1) < abs(ho["raw_jump"] - 1)
