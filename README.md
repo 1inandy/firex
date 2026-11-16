@@ -39,7 +39,7 @@ Satellites have tracked fire hotspots since 2000, but the record is split. MODIS
 - **Harmonized 25-year record**: MODIS is converted to VIIRS units with an FRP-stratified fit, Terra-only months (before Aqua) are scaled to Terra + Aqua, and NOAA-20 is bridged across the S-NPP shutdown.
 - **Burning calendar**: a month × year heatmap for any rectangle, polygon or circle, with counts, anomaly and raw-sensor views on colorblind-safe ramps.
 - **This month vs. history**: the month so far against the same days of the same month in every past year, with rank and "highest since".
-- **Honest uncertainty**: every converted month carries an out-of-sample 10–90% band, wider for small areas, where the conversion is less certain.
+- **Honest uncertainty**: MODIS-converted months carry a 10–90% band calibrated out of sample, wider for small areas, where the conversion is less certain. The Terra-only and NOAA-20 factors take their bands from year-to-year spread.
 - **Outage-aware**: satellite outages are detected from cross-sensor evidence, kept out of the fits and filled in the record, so they never read as "no fire".
 - **Fire events & precedent**: detections are clustered into events, with typical duration and footprint for fires starting in a given month.
 - **Downloads**: the hotspot CSV (exact detections, streamed), the calendar CSV (with bands and sources), and PNG figures.
@@ -108,11 +108,12 @@ Watching the same fires in the same months (2012–2019), VIIRS logs **1.95×** 
 | Monthly error (MAPE) | 12.6% (baseline 13.6%) | 10.8% (baseline 11.8%) |
 | Spatial holdout (fit on half the grid cells, test on the other half) | 5.9% | 1.9% |
 | A single 1° tile (~10,000 km²): median annual error / 1 in 10 worse than | 17% / 56% | 12% / 35% |
+| …months inside the small-area band, all active tile-months (nominal 80%) | 76% | 76% |
 | NOAA-20 → S-NPP bridge, annual error | 0.8% | 0.7% |
 | Drift stress test 2020–2025: mean bias of the pre-drift conversion | −5.3% | −0.7% |
 | Drift-year months inside the 10–90% band (nominal 80%) | 72% | 69% |
 
-Small drawn areas are harder: a single valley has fewer fires, so its year-to-year ratio varies more. The app widens the band for areas under ~100,000 km² using the tile results above. Terra drifts to earlier overpasses (since ~2020) and Aqua to later ones (since ~2022). Late-mission MODIS can therefore see a different part of the daily fire cycle, which is why the conversion is fit on pre-drift years.
+Small drawn areas are harder: a single valley has fewer fires, so its year-to-year ratio varies more, and in a third of California tile-months MODIS saw nothing while VIIRS caught small fires. For areas under ~100,000 km², the app widens the band using the tile results above: a multiplicative range plus an additive allowance for those missed small fires. Terra drifts to earlier overpasses (since ~2020) and Aqua to later ones (since ~2022). Late-mission MODIS can therefore see a different part of the daily fire cycle, which is why the conversion is fit on pre-drift years.
 
 ### Example output
 

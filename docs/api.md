@@ -17,8 +17,7 @@ Errors: `{"detail": "..."}` with 400 (bad params), 413 (CSV request too large) o
 ```
 `synthetic: true` means the data came from `pipeline.demo` (not real FIRMS). The UI must show a banner.
 Also returns `method` (harmonization in use), `overlap_start_year` (2012), `modis_drift_from` (`{"Terra": 2020, "Aqua": 2022}`),
-`aqua_first_month` (`"2002-07"`; earlier MODIS is Terra only), `snpp_end` (last full month of S-NPP coverage; later months
-come from NOAA-20), `sensors` (per family `[first, last]` day covered by the input files), `outages` (per sensor group,
+`aqua_first_month` (`"2002-07"`; earlier MODIS is Terra only), `snpp_end` (last full month of S-NPP coverage), `sensors` (per family `[first, last]` day covered by the input files), `outages` (per sensor group,
 detected outage date ranges) and `live_nrt` (the server has a FIRMS key).
 
 ## `/regions`
@@ -43,7 +42,7 @@ Harmonized month × year series (VIIRS-equivalent fire cell-days).
    "top_anomalies": [{"year": 2020, "month": 9, "value": 900.0, "anomaly": 5.1}]
  }}
 ```
-- `source`: `"modis_converted"` (2000–2011, MODIS converted; Terra-only months before 2002-07 also scaled to Terra + Aqua), `"viirs"` (S-NPP, measured, 2012 → `snpp_end`) or `"noaa20_converted"` (NOAA-20 in S-NPP units, after `snpp_end`). `lo/hi` = 10–90% band from leave-one-year-out errors (equal to value for measured S-NPP).
+- `source`: `"modis_converted"` (2000–2011, MODIS converted; Terra-only months before 2002-07 also scaled to Terra + Aqua), `"viirs"` (S-NPP, measured) or `"noaa20_converted"` (NOAA-20 in S-NPP units). The choice is made per month from coverage: NOAA-20 replaces S-NPP in any month S-NPP missed days (an outage such as Jul–Aug 2022, or after S-NPP ended) when NOAA-20 observed more of it. `lo/hi` = 10–90% band from leave-one-year-out errors (equal to value for measured S-NPP).
 - `anomaly` = value ÷ median for that calendar month (null if median is 0, and for the partial month). The median uses every complete month of the whole record, whatever `from`/`to` is displayed.
 - `observed`: share of the month's days the chosen sensor was delivering data (1 = complete). Below 1, the missing
   days were an outage (or the start of a sensor's coverage) and the value is scaled up to the whole month; an S-NPP month
@@ -126,5 +125,5 @@ Out-of-sample checks of the conversion actually used (fit on 2012–2019, before
 - `drift_test`: the deployed conversion applied to 2020→ (drifted MODIS); `mean_bias_pct` < 0 = MODIS sees fewer fires.
 - `band`: the 10–90% multiplicative band shipped with converted months; `band_coverage_pct` = share of drift-test months inside it.
 - `noaa20_bridge`: leave-one-year-out error of the NOAA-20 → S-NPP factor. `terra_scale`: Terra + Aqua ÷ Terra per month.
-- `small_area`: `[{"tile_deg": 1.0, "median_annual_abs_error_pct": 17.3, "p90_annual_abs_error_pct": 56.1, "band": [0.63, 2.73], "n_tile_years": 261}, …]`, the same leave-one-year-out test on 1° and 0.25° tiles.
+- `small_area`: `[{"tile_deg": 1.0, "median_annual_abs_error_pct": 17.3, "p90_annual_abs_error_pct": 56.1, "band": [0.63, 2.73], "band_add_per_tile": 6.0, "band_coverage_pct": 76.2, "zero_prediction_share_pct": 32.3, "n_tile_years": 261}, …]`, the same leave-one-year-out test on 1° and 0.25° tiles; coverage is over all active tile-months.
 - All fits and scores use only months that every relevant satellite observed completely (see `/health` → `outages`).
