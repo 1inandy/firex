@@ -42,7 +42,7 @@ def swath_duplicates(df: pd.DataFrame) -> pd.Series:
     key = pd.factorize(pd.Series(df["sensor"].astype(str).to_numpy()) + "|" + df["satellite"].astype(str).to_numpy()
                        + "|" + df["acq_date"].astype(str).to_numpy() + "|" + df["daynight"].astype(str).to_numpy())[0]
     # Priority: brightest first, then a fixed spatial order, so the result doesn't depend on input order.
-    order = np.lexsort((lon, lat, -df["frp"].to_numpy(float), minutes, key))
+    order = np.lexsort((lon, lat, minutes, -df["frp"].to_numpy(float), key))
     rank = np.empty(len(df), dtype=np.int64)
     rank[order] = np.arange(len(df))
     # Hash into cells one tolerance tall and wide enough in longitude at the highest latitude present,
