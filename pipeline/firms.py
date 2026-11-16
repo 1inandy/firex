@@ -28,9 +28,13 @@ def sensor_label(instrument: str, satellite: str) -> str:
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Bring a raw FIRMS frame (MODIS or VIIRS) to a common schema."""
     df = df.copy()
+    if "instrument" not in df:  # NRT files have no instrument column; VIIRS rows carry I-band temperatures
+        df["instrument"] = "VIIRS" if "bright_ti4" in df else "MODIS"
+    df["satellite"] = df["satellite"].astype(str).replace({"T": "Terra", "A": "Aqua"})
     df["acq_date"] = pd.to_datetime(df["acq_date"]).dt.date
+    df["acq_time"] = df["acq_time"].astype(str).str.zfill(4)
     df["sensor"] = [sensor_label(i, s) for i, s in zip(df["instrument"], df["satellite"])]
-    df["confidence"] = df["confidence"].astype(str).str.lower()
+    df["confidence"] = df["confidence"].astype(str).str.lower().replace({"low": "l", "nominal": "n", "high": "h"})
     if "type" not in df.columns:  # NRT files have no type column
         df["type"] = pd.NA
     keep = ["latitude", "longitude", "acq_date", "acq_time", "sensor", "satellite",
