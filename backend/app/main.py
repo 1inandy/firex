@@ -163,7 +163,9 @@ def csv(a: Area = Depends(area_param), start: str = Query(..., alias="from"), en
     if n > CSV_MAX_ROWS:
         raise HTTPException(413, f"{n:,} hotspots in that box and date range; the limit is {CSV_MAX_ROWS:,}. "
                                  "Narrow the area or the dates.")
-    return _stream_csv(f"SELECT * {where} ORDER BY acq_date, acq_time", args, a, "plume_hotspots.csv")
+    cols = ("latitude::DOUBLE AS latitude, longitude::DOUBLE AS longitude, acq_date, acq_time, sensor, satellite, "
+            "confidence, frp::DOUBLE AS frp, daynight, type")
+    return _stream_csv(f"SELECT {cols} {where} ORDER BY acq_date, acq_time", args, a, "plume_hotspots.csv")
 
 
 @app.get("/cells")

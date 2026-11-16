@@ -44,6 +44,19 @@ def coverage(raw: Path, hotspots: pd.DataFrame) -> dict[str, list[str]]:
     return {f: [str(starts[f].date()), ends.get(f, str(last[f].date()))] for f in starts.index}
 
 
+def write_hotspots(df: pd.DataFrame, path: Path) -> None:
+    """Compact hotspot table for the CSV export: exact 5-decimal coordinates as fixed-point numbers, rows
+    sorted by date and place, ZSTD. About half the size of the default, so the deploy stays small."""
+    import duckdb
+    with duckdb.connect() as con:
+        con.register("h", df)
+        con.execute(f"""COPY (SELECT latitude::DECIMAL(8,5) AS latitude, longitude::DECIMAL(8,5) AS longitude,
+                                     acq_date::DATE AS acq_date, acq_time, sensor, satellite, confidence,
+                                     frp::DECIMAL(8,2) AS frp, daynight, type::TINYINT AS type
+                              FROM h ORDER BY acq_date, sensor, latitude, longitude)
+                        TO '{path}' (FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 19)""")
+
+
 def _last_full_month(day: str) -> tuple[int, int]:
     d = pd.Timestamp(day)
     period = d.to_period("M")
@@ -64,7 +77,7 @@ def main(raw_dir: str) -> None:
     static.to_parquet(config.GRID / "static_sources.parquet", index=False)
     hotspots = mask_static(clean(loaded), static)
     print(f"cleaned {len(loaded):,} -> {len(hotspots):,} hotspots ({time.time() - t0:.0f}s)")
-    hotspots.to_parquet(config.GRID / "hotspots.parquet", index=False)
+    write_hotspots(hotspots, config.GRID / "hotspots.parquet")
     grid = to_grid(hotspots)
     grid.to_parquet(config.GRID / "cells_daily.parquet", index=False)
     monthly = monthly_cell_days(grid)
