@@ -488,6 +488,43 @@ def calibrate_bands(ratios: pd.DataFrame, bands: dict[str, tuple[float, float]])
     return r
 
 
+SMALL_AREA_TILES = (1.0, 0.25)  # degrees; ~10,000 and ~600 km² at mid-latitudes
+
+
+def _tile_errors(ratios: pd.DataFrame, monthly: pd.DataFrame, year: int, deg: float,
+                 obs: pd.DataFrame | None) -> pd.DataFrame:
+    """Per (tile, month) of `year`: MODIS-predicted vs observed VIIRS, for tiles of `deg` degrees."""
+    m = monthly[monthly.year == year]
+    tile = (np.floor(m.lat / deg).astype(int).astype(str) + "_" + np.floor(m.lon / deg).astype(int).astype(str))
+    t = m.assign(tile=tile).pivot_table(index=["tile", "year", "month"], columns="family",
+                                        values=["fire_cell_days", "strong_cell_days"], aggfunc="sum", fill_value=0)
+    if ("fire_cell_days", "MODIS") not in t or ("fire_cell_days", "VIIRS") not in t:
+        return pd.DataFrame()
+    t = pd.DataFrame({"fire_cell_days": t[("fire_cell_days", "MODIS")],
+                      "strong_cell_days": t[("strong_cell_days", "MODIS")],
+                      "observed": t[("fire_cell_days", "VIIRS")]}).reset_index()
+    t = _drop_incomplete(t, obs, {"MODIS": 1.0, "VIIRS": 1.0, "TERRA": 0.9, "AQUA": 0.9})
+    c = convert_modis(t, ratios, "frp_strata")
+    return t.assign(predicted=c.value.to_numpy())
+
+
+def _small_area(tiles: pd.DataFrame) -> dict | None:
+    """Annual error across tiles and the 10–90% band of monthly observed ÷ predicted, out of sample."""
+    if tiles.empty:
+        return None
+    yr = tiles.groupby(["tile", "year"]).agg(p=("predicted", "sum"), o=("observed", "sum"))
+    yr = yr[yr.o >= 50]  # tiles with real fire activity that year
+    mo = tiles[(tiles.observed >= 10) & (tiles.predicted > 0)]
+    if yr.empty or len(mo) < 20:
+        return None
+    err = (100 * (yr.p - yr.o) / yr.o).abs()
+    r = mo.observed / mo.predicted
+    return {"median_annual_abs_error_pct": round(float(err.median()), 1),
+            "p90_annual_abs_error_pct": round(float(err.quantile(0.9)), 1),
+            "band": [round(float(r.quantile(0.1)), 3), round(float(r.quantile(0.9)), 3)],
+            "n_tile_years": int(len(yr))}
+
+
 def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, method: str | None = None,
              bands: dict | None = None, obs: pd.DataFrame | None = None) -> dict:
     """Out-of-sample checks of the conversion that is actually used (fit on CONVERSION_FIT_YEARS).
@@ -508,10 +545,14 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
     if len(avail) < 3:
         raise ValueError("Need at least 3 overlap years in the fit window to validate")
     folds: dict[str, list[pd.DataFrame]] = {}
+    tiles: dict[float, list[pd.DataFrame]] = {d: [] for d in SMALL_AREA_TILES}
     for y in avail:
         ratios = fit_monthly_ratio(monthly[monthly.year != y], y0, y1, obs)
         for m, p in _predictions(ratios, monthly, [y], last_full, obs).items():
             folds.setdefault(m, []).append(p)
+        if "lat" in monthly:
+            for d in SMALL_AREA_TILES:
+                tiles[d].append(_tile_errors(ratios, monthly, y, d, obs))
     preds = {m: pd.concat(ps, ignore_index=True) for m, ps in folds.items()}
     if method not in preds:
         method = "frp_strata"
@@ -565,6 +606,8 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
         "baseline": _brief(scores, "ratio"),
         "methods": [_brief(scores, m) for m in config.HARMONIZE_METHODS if m in scores],
         "drift_test": drift_test,
+        "small_area": [{"tile_deg": d, **sa} for d in SMALL_AREA_TILES
+                       if (sa := _small_area(pd.concat(tiles[d], ignore_index=True) if tiles[d] else pd.DataFrame()))],
         "spatial": spatial,
         "terra_scale": {int(r.month): round(float(r.terra_scale), 3) for r in full.itertuples()},
         "drift_from": dict(config.MODIS_DRIFT_FROM),
