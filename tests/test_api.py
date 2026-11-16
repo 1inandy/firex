@@ -154,8 +154,8 @@ def test_raw_series_and_handoff(demo_data):
     cal = demo_data.get("/calendar", params={"bbox": CA}).json()
     m = cal["months"]
     assert {x["raw_source"] for x in m if x["year"] < 2012} == {"modis"}
-    assert {x["raw_source"] for x in m if 2012 <= x["year"] <= 2025} == {"viirs"}
-    assert (m[-1]["raw_source"], m[-1]["source"]) == ("noaa20", "noaa20_converted")  # after S-NPP coverage
+    assert {x["raw_source"] for x in m if x["year"] >= 2012} == {"viirs"}  # S-NPP observed every month here
+    assert all(x["observed"] == 1.0 for x in m)  # quiet synthetic days are not mistaken for outages
     ho = cal["handoff"]
     assert ho["before_years"] == [2009, 2011] and ho["after_years"] == [2012, 2014]
     assert abs(ho["harmonized_jump"] - 1) < abs(ho["raw_jump"] - 1)

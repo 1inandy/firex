@@ -32,8 +32,9 @@ RATIO_COLS = ["month", "ratio", "lo", "hi", "weak", "strong", "band_lo", "band_h
 QM_COLS = [f"qm_{k}" for k in range(1, config.QM_MAX_K + 1)] + ["qm_band_lo", "qm_band_hi"]
 
 
-def _overlap_totals(monthly: pd.DataFrame, first: int, last: int | None) -> pd.DataFrame:
-    """Per (year, month): MODIS, MODIS_strong and VIIRS cell-day totals in the given year range."""
+def _overlap_totals(monthly: pd.DataFrame, first: int, last: int | None, obs: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Per (year, month): MODIS, MODIS_strong and VIIRS cell-day totals in the given year range, months where
+    every satellite observed all days only (an outage would read as missing fire)."""
     ov = monthly[(monthly["year"] >= first) & ((monthly["year"] <= last) if last else True)]
     if "strong_cell_days" not in ov:
         ov = ov.assign(strong_cell_days=0)
@@ -42,10 +43,12 @@ def _overlap_totals(monthly: pd.DataFrame, first: int, last: int | None) -> pd.D
     fams = set(tot.columns.get_level_values(1))
     if "MODIS" not in fams or "VIIRS" not in fams:
         raise ValueError("Need both MODIS and VIIRS data in the overlap years")
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "MODIS": tot[("fire_cell_days", "MODIS")], "MODIS_strong": tot[("strong_cell_days", "MODIS")],
         "VIIRS": tot[("fire_cell_days", "VIIRS")],
     }).reset_index()
+    # One satellite missing ≤ 3 days barely changes the Terra + Aqua union; the union and S-NPP must be complete.
+    return _drop_incomplete(out, obs, {"MODIS": 1.0, "VIIRS": 1.0, "TERRA": 0.9, "AQUA": 0.9})
 
 
 def _fit_strata(rows: pd.DataFrame, fallback: float) -> tuple[float, float]:
@@ -122,7 +125,7 @@ def _fit_quantile(monthly: pd.DataFrame, first_year: int, last_year: int | None)
     return pd.DataFrame(rows)
 
 
-def _terra_scale(monthly: pd.DataFrame) -> dict[int, tuple[float, float, float]]:
+def _terra_scale(monthly: pd.DataFrame, obs: pd.DataFrame | None = None) -> dict[int, tuple[float, float, float]]:
     """Per calendar month: (scale, lo, hi). scale = MODIS (Terra + Aqua) cell-days ÷ those Terra saw over
     TERRA_SCALE_YEARS; lo/hi = 10–90% of the yearly values ÷ scale (how much the scale varies by year)."""
     if "terra_cell_days" not in monthly:
@@ -130,7 +133,7 @@ def _terra_scale(monthly: pd.DataFrame) -> dict[int, tuple[float, float, float]]
     y0, y1 = config.TERRA_SCALE_YEARS
     m = monthly[(monthly.family == "MODIS") & monthly.year.between(y0, y1)]
     t = m.groupby(["year", "month"])[["fire_cell_days", "terra_cell_days"]].sum().reset_index()
-    t = t[t.terra_cell_days > 0]
+    t = _drop_incomplete(t[t.terra_cell_days > 0], obs, ("TERRA", "AQUA"))
     if t.empty:
         return {}
     pooled = float(t.fire_cell_days.sum() / t.terra_cell_days.sum())
@@ -144,13 +147,13 @@ def _terra_scale(monthly: pd.DataFrame) -> dict[int, tuple[float, float, float]]
     return out
 
 
-def _noaa20_scale(monthly: pd.DataFrame) -> pd.DataFrame | None:
+def _noaa20_scale(monthly: pd.DataFrame, obs: pd.DataFrame | None = None) -> pd.DataFrame | None:
     """Per calendar month: S-NPP ÷ NOAA-20 cell-days over the months both covered, with a 10–90% band."""
     t = monthly[monthly.year >= config.NOAA20_BRIDGE_FIRST_YEAR].pivot_table(
         index=["year", "month"], columns="family", values="fire_cell_days", aggfunc="sum", fill_value=0)
     if "NOAA20" not in t or "VIIRS" not in t:
         return None
-    t = t[(t.NOAA20 > 0) & (t.VIIRS > 0)].reset_index()
+    t = _drop_incomplete(t[(t.NOAA20 > 0) & (t.VIIRS > 0)].reset_index(), obs, ("VIIRS", "NOAA20"))
     if len(t) < 3:
         return None
     pooled = float(t.VIIRS.sum() / t.NOAA20.sum())
@@ -164,11 +167,48 @@ def _noaa20_scale(monthly: pd.DataFrame) -> pd.DataFrame | None:
     return pd.DataFrame(rows)
 
 
-def _after(year, month, end: tuple[int, int] | None) -> np.ndarray:
-    """True for (year, month) later than `end` (never, when end is None)."""
-    if end is None:
-        return np.zeros(len(np.asarray(year)), dtype=bool)
-    return np.asarray(year) * 12 + np.asarray(month) > end[0] * 12 + end[1]
+def _frac(obs: pd.DataFrame | None, fam: str, year, month) -> np.ndarray:
+    """Share of the month's days on which sensor group `fam` was observing (1.0 when unknown)."""
+    key = pd.DataFrame({"year": np.asarray(year, int), "month": np.asarray(month, int)})
+    if obs is None or key.empty:
+        return np.ones(len(key))
+    o = obs.loc[obs.family == fam, ["year", "month", "frac"]]
+    return key.merge(o, on=["year", "month"], how="left").frac.fillna(1.0).to_numpy(float)
+
+
+def _drop_incomplete(df: pd.DataFrame, obs: pd.DataFrame | None, fams) -> pd.DataFrame:
+    """Rows of (year, month) where the sensor groups observed enough of the month (for fitting and scoring).
+
+    `fams` is a list of groups that must be complete, or a {group: minimum share of days} mapping.
+    """
+    if obs is None or df.empty:
+        return df
+    need = fams if isinstance(fams, dict) else {f: 1.0 for f in fams}
+    ok = np.ones(len(df), dtype=bool)
+    for f, minimum in need.items():
+        ok &= _frac(obs, f, df.year, df.month) >= minimum
+    return df[ok]
+
+
+def record_source(year, month, obs: pd.DataFrame | None) -> tuple[np.ndarray, np.ndarray]:
+    """Which sensor each month of the record comes from, and the share of days it observed.
+
+    Before OVERLAP_START_YEAR: converted MODIS. After: S-NPP, unless S-NPP missed days (an outage, or after
+    it stopped on 2026-11-02) and NOAA-20 observed more of the month, in which case NOAA-20 converted to
+    S-NPP units. The caller scales by 1/frac to fill outage days it could not replace.
+    """
+    year, month = np.asarray(year, int), np.asarray(month, int)
+    fv, fn, fm = (_frac(obs, f, year, month) for f in ("VIIRS", "NOAA20", "MODIS"))
+    early = year < config.OVERLAP_START_YEAR
+    n20 = ~early & (fv < 1) & (fn > fv)
+    return (np.select([early, n20], ["modis_converted", "noaa20_converted"], "viirs"),
+            np.select([early, n20], [fm, fn], fv))
+
+
+def _fill(value, frac):
+    """Scale a count observed on `frac` of the month's days to the whole month (no-op at 0 or 1)."""
+    frac = np.asarray(frac, float)
+    return np.where((frac > 0) & (frac < 1), value / np.where(frac > 0, frac, 1.0), value)
 
 
 def _terra_only(year: pd.Series, month: pd.Series) -> np.ndarray:
@@ -177,7 +217,8 @@ def _terra_only(year: pd.Series, month: pd.Series) -> np.ndarray:
 
 
 def fit_monthly_ratio(monthly: pd.DataFrame, first_year: int = config.CONVERSION_FIT_YEARS[0],
-                      last_year: int | None = config.CONVERSION_FIT_YEARS[1]) -> pd.DataFrame:
+                      last_year: int | None = config.CONVERSION_FIT_YEARS[1],
+                      obs: pd.DataFrame | None = None) -> pd.DataFrame:
     """Conversion table for ONE region: one row per month 1–12 (schema RATIO_COLS).
 
     `ratio/lo/hi` are the baseline ratio and its 10–90% spread; `weak/strong` are frp_strata
@@ -185,13 +226,13 @@ def fit_monthly_ratio(monthly: pd.DataFrame, first_year: int = config.CONVERSION
     data get pooled values so every month is present. With per-cell input (a `cell_id` column) the
     quantile-mapping columns QM_COLS are added too.
     """
-    tot = _overlap_totals(monthly, first_year, last_year)
+    tot = _overlap_totals(monthly, first_year, last_year, obs)
     tot = tot[tot["MODIS"] > 0]
     if tot.empty:
         raise ValueError("No overlap months with MODIS detections")
     tot = tot.assign(ratio=tot["VIIRS"] / tot["MODIS"])
     pooled = float(tot["VIIRS"].sum() / tot["MODIS"].sum())
-    terra = _terra_scale(monthly)
+    terra = _terra_scale(monthly, obs)
     rows = []
     for m in range(1, 13):
         sub = tot[tot.month == m]
@@ -209,23 +250,24 @@ def fit_monthly_ratio(monthly: pd.DataFrame, first_year: int = config.CONVERSION
             "terra_lo": terra.get(m, (1.0, 1.0, 1.0))[1], "terra_hi": terra.get(m, (1.0, 1.0, 1.0))[2],
         })
     out = pd.DataFrame(rows, columns=RATIO_COLS[:11])
-    n20 = _noaa20_scale(monthly)
+    n20 = _noaa20_scale(monthly, obs)
     out = out.merge(n20, on="month", how="left") if n20 is not None else out
     qm = _fit_quantile(monthly, first_year, last_year)
     return out.merge(qm, on="month", how="left") if qm is not None else out
 
 
-def fit_regional_ratios(monthly: pd.DataFrame, regions: dict = config.REGIONS) -> pd.DataFrame:
+def fit_regional_ratios(monthly: pd.DataFrame, regions: dict = config.REGIONS,
+                        obs: pd.DataFrame | None = None) -> pd.DataFrame:
     """Conversion tables per configured region (cells inside its bbox) plus "global" (all data)."""
     parts = []
     for rid, reg in regions.items():
         w, s, e, n = reg["bbox"]
         sub = monthly[monthly.lon.between(w, e) & monthly.lat.between(s, n)]
         try:
-            parts.append(fit_monthly_ratio(sub).assign(region=rid))
+            parts.append(fit_monthly_ratio(sub, obs=obs).assign(region=rid))
         except ValueError:
             continue
-    parts.append(fit_monthly_ratio(monthly).assign(region="global"))
+    parts.append(fit_monthly_ratio(monthly, obs=obs).assign(region="global"))
     return pd.concat(parts, ignore_index=True)
 
 
@@ -260,28 +302,31 @@ def convert_modis(modis: pd.DataFrame, ratios: pd.DataFrame, method: str | None 
 
 
 def harmonize(monthly: pd.DataFrame, ratios: pd.DataFrame | None = None,
-              method: str | None = None, snpp_end: tuple[int, int] | None = None) -> pd.DataFrame:
+              method: str | None = None, obs: pd.DataFrame | None = None) -> pd.DataFrame:
     """Monthly series in VIIRS-equivalent fire cell-days for the rows in `monthly`.
 
     Pass `ratios` fitted on a whole region (data/harmonized/ratios.parquet) when `monthly`
     is a small user-drawn area; fitting on a tiny area is too noisy.
     `monthly` needs year, month, family, fire_cell_days[, strong_cell_days] (per-cell rows are summed).
-    `snpp_end` = last (year, month) of S-NPP coverage; later months use NOAA-20 converted to S-NPP units.
+    `obs` (family, year, month, frac): share of days each sensor observed; it picks the source of each month
+    (see `record_source`) and fills outage days. Output column `observed` is that share (1 = complete).
     """
     method = method or config.HARMONIZE_METHOD
     if ratios is None:
-        ratios = fit_monthly_ratio(monthly)
+        ratios = fit_monthly_ratio(monthly, obs=obs)
     ratios = ratios[[c for c in RATIO_COLS + QM_COLS if c in ratios]]
     vals = [c for c in ("fire_cell_days", "strong_cell_days") if c in monthly]
     tot = monthly.groupby(["year", "month", "family"], as_index=False)[vals].sum()
-    viirs = tot[(tot["family"] == "VIIRS") & (tot["year"] >= config.OVERLAP_START_YEAR)]
-    viirs = viirs[~_after(viirs.year, viirs.month, snpp_end)]
-    viirs = viirs.assign(fire_cell_days=viirs.fire_cell_days.astype(float), lo=lambda d: d.fire_cell_days,
-                         hi=lambda d: d.fire_cell_days, source="viirs")
-    n20 = tot[(tot["family"] == "NOAA20") & _after(tot.year, tot.month, snpp_end)]
+    late = tot[tot["year"] >= config.OVERLAP_START_YEAR]
+    src, frac = record_source(late.year, late.month, obs)
+    late = late.assign(src=src, observed=frac)
+    viirs = late[(late.family == "VIIRS") & (late.src == "viirs")]
+    v = _fill(viirs.fire_cell_days.astype(float).to_numpy(), viirs.observed)
+    viirs = viirs.assign(fire_cell_days=v, lo=v, hi=v, source="viirs")
+    n20 = late[(late.family == "NOAA20") & (late.src == "noaa20_converted")]
     if len(n20) and "n20_scale" in ratios:
         n20 = n20.merge(ratios[["month", "n20_scale", "n20_band_lo", "n20_band_hi"]], on="month", how="left")
-        v = n20.fire_cell_days * n20.n20_scale
+        v = _fill((n20.fire_cell_days * n20.n20_scale).to_numpy(), n20.observed)
         viirs = pd.concat([viirs, n20.assign(fire_cell_days=v, lo=v * n20.n20_band_lo, hi=v * n20.n20_band_hi,
                                              source="noaa20_converted")])
     table = _qm_table(ratios) if method == "quantile" else None
@@ -300,15 +345,18 @@ def harmonize(monthly: pd.DataFrame, ratios: pd.DataFrame | None = None,
         klo = k * np.where(t, modis.get("terra_lo", 1.0), 1.0)
         khi = k * np.where(t, modis.get("terra_hi", 1.0), 1.0)
         modis = modis.assign(value=modis.value * k, lo=modis.lo * klo, hi=modis.hi * khi)
+    fm = _frac(obs, "MODIS", modis.year, modis.month)
+    modis = modis.assign(value=_fill(modis.value.to_numpy(), fm), lo=_fill(modis.lo.to_numpy(), fm),
+                         hi=_fill(modis.hi.to_numpy(), fm), observed=fm)
     modis = modis.assign(fire_cell_days=modis.value, source="modis_converted")
-    cols = ["year", "month", "fire_cell_days", "lo", "hi", "source"]
+    cols = ["year", "month", "fire_cell_days", "lo", "hi", "source", "observed"]
     return pd.concat([modis[cols], viirs[cols]]).sort_values(["year", "month"]).reset_index(drop=True)
 
 
 def _scores(t: pd.DataFrame) -> dict:
     annual = t.groupby("year").agg(predicted=("predicted", "sum"), observed=("observed", "sum"),
                                    n=("month", "size")).reset_index()
-    annual = annual[annual.n == 12]
+    annual = annual[annual.n >= 10]  # years with ≥ 10 fully observed months, scored over those months
     annual = annual.assign(error_pct=100 * (annual.predicted - annual.observed) / annual.observed.replace(0, np.nan))
     sig = t[t.observed >= 10]  # skip near-empty months where % error is meaningless
     mape = float((100 * (sig.predicted - sig.observed).abs() / sig.observed).mean()) if len(sig) else None
@@ -322,7 +370,7 @@ def _scores(t: pd.DataFrame) -> dict:
     }
 
 
-def raw_series(monthly: pd.DataFrame, snpp_end: tuple[int, int] | None = None) -> pd.DataFrame:
+def raw_series(monthly: pd.DataFrame, obs: pd.DataFrame | None = None) -> pd.DataFrame:
     """The naive, un-harmonized record: MODIS cell-days before OVERLAP_START_YEAR, VIIRS after.
 
     This is what you get by stitching the two sensors together; the jump at the handoff is the sensor
@@ -332,9 +380,9 @@ def raw_series(monthly: pd.DataFrame, snpp_end: tuple[int, int] | None = None) -
         return pd.DataFrame(columns=["year", "month", "raw", "raw_source"])
     tot = monthly.groupby(["year", "month", "family"], as_index=False)["fire_cell_days"].sum()
     early = (tot.family == "MODIS") & (tot.year < config.OVERLAP_START_YEAR)
-    after = _after(tot.year, tot.month, snpp_end)
-    late = (tot.family == "VIIRS") & (tot.year >= config.OVERLAP_START_YEAR) & ~after
-    n20 = (tot.family == "NOAA20") & after
+    src, _ = record_source(tot.year, tot.month, obs)
+    late = (tot.family == "VIIRS") & (src == "viirs")
+    n20 = (tot.family == "NOAA20") & (src == "noaa20_converted")
     out = tot[early | late | n20].assign(raw=lambda d: d.fire_cell_days.astype(float),
                                          raw_source=lambda d: d.family.map({"MODIS": "modis", "VIIRS": "viirs",
                                                                             "NOAA20": "noaa20"}))
@@ -347,9 +395,9 @@ def drift_flag(year: int) -> list[str]:
 
 
 def _predictions(ratios: pd.DataFrame, test: pd.DataFrame, years: list[int],
-                 last_full: tuple[int, int] | None) -> dict[str, pd.DataFrame]:
+                 last_full: tuple[int, int] | None, obs: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
     """Predicted vs observed VIIRS per (year, month) in `years`, from the MODIS in `test`, per method."""
-    tot = _overlap_totals(test[test.year.isin(years)], min(years), max(years))
+    tot = _overlap_totals(test[test.year.isin(years)], min(years), max(years), obs)
     if last_full:
         tot = tot[tot.year * 12 + tot.month <= last_full[0] * 12 + last_full[1]]
     tot = tot.rename(columns={"MODIS_strong": "strong_cell_days"}).assign(fire_cell_days=lambda d: d.MODIS)
@@ -390,26 +438,28 @@ def _checkerboard(cell_id: pd.Series) -> np.ndarray | None:
     return None if i.isna().any() or j.isna().any() else ((i + j) % 2).to_numpy(int)
 
 
-def _validate_noaa20(monthly: pd.DataFrame) -> dict | None:
-    """Leave-one-year-out check of the NOAA-20 → S-NPP factor on complete overlap years."""
-    t = monthly[monthly.year >= config.NOAA20_BRIDGE_FIRST_YEAR].groupby(["year", "family"]).agg(
-        cd=("fire_cell_days", "sum"), n=("month", "nunique")).reset_index()
-    full = sorted(set(t[(t.family == "NOAA20") & (t.n == 12)].year) & set(t[(t.family == "VIIRS") & (t.n == 12)].year))
+def _validate_noaa20(monthly: pd.DataFrame, obs: pd.DataFrame | None = None) -> dict | None:
+    """Leave-one-year-out check of the NOAA-20 → S-NPP factor: each year's S-NPP total (over the months both
+    observed completely) predicted from NOAA-20 with the factor fit on the other years."""
+    m = monthly[(monthly.year >= config.NOAA20_BRIDGE_FIRST_YEAR) & monthly.family.isin(["VIIRS", "NOAA20"])]
+    m = _drop_incomplete(m, obs, ("VIIRS", "NOAA20"))
+    t = m.groupby(["year", "family"]).agg(n=("month", "nunique")).reset_index()
+    full = sorted(set(t[(t.family == "NOAA20") & (t.n >= 10)].year) & set(t[(t.family == "VIIRS") & (t.n >= 10)].year))
     if len(full) < 3:
         return None
     rows = []
     for y in full:
-        sc = _noaa20_scale(monthly[monthly.year != y])
+        sc = _noaa20_scale(monthly[monthly.year != y], obs)
         if sc is None:
             return None
-        cur = monthly[(monthly.year == y) & (monthly.family.isin(["VIIRS", "NOAA20"]))]
+        cur = m[m.year == y]
         tot = cur.groupby(["month", "family"]).fire_cell_days.sum().unstack(fill_value=0)
         if "NOAA20" not in tot or "VIIRS" not in tot:
             continue
         pred = float((tot.NOAA20 * sc.set_index("month").n20_scale.reindex(tot.index)).sum())
-        obs = float(tot.VIIRS.sum())
-        rows.append({"year": int(y), "predicted": round(pred, 1), "observed": obs,
-                     "error_pct": round(100 * (pred - obs) / obs, 1) if obs else None})
+        seen = float(tot.VIIRS.sum())
+        rows.append({"year": int(y), "predicted": round(pred, 1), "observed": seen,
+                     "error_pct": round(100 * (pred - seen) / seen, 1) if seen else None})
     errs = [abs(r["error_pct"]) for r in rows if r["error_pct"] is not None]
     return {"years": [full[0], full[-1]], "annual": rows,
             "annual_abs_error_pct": round(sum(errs) / len(errs), 1) if errs else None}
@@ -439,7 +489,7 @@ def calibrate_bands(ratios: pd.DataFrame, bands: dict[str, tuple[float, float]])
 
 
 def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, method: str | None = None,
-             bands: dict | None = None) -> dict:
+             bands: dict | None = None, obs: pd.DataFrame | None = None) -> dict:
     """Out-of-sample checks of the conversion that is actually used (fit on CONVERSION_FIT_YEARS).
 
     * Headline, leave-one-year-out: each fit-window year is predicted from coefficients fit on the others.
@@ -459,8 +509,8 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
         raise ValueError("Need at least 3 overlap years in the fit window to validate")
     folds: dict[str, list[pd.DataFrame]] = {}
     for y in avail:
-        ratios = fit_monthly_ratio(monthly[monthly.year != y], y0, y1)
-        for m, p in _predictions(ratios, monthly, [y], last_full).items():
+        ratios = fit_monthly_ratio(monthly[monthly.year != y], y0, y1, obs)
+        for m, p in _predictions(ratios, monthly, [y], last_full, obs).items():
             folds.setdefault(m, []).append(p)
     preds = {m: pd.concat(ps, ignore_index=True) for m, ps in folds.items()}
     if method not in preds:
@@ -469,12 +519,12 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
     main = preds[method].sort_values(["year", "month"])
     bands.update(loyo_bands(preds))
 
-    full = calibrate_bands(fit_monthly_ratio(monthly, y0, y1), bands)
+    full = calibrate_bands(fit_monthly_ratio(monthly, y0, y1, obs), bands)
     coverage = None
     later = sorted(set(monthly[(monthly.family == "VIIRS") & (monthly.year > y1)].year))
     drift_test = None
     if later:
-        dp = _predictions(full, monthly, later, last_full).get(method)
+        dp = _predictions(full, monthly, later, last_full, obs).get(method)
         if dp is not None and len(dp):
             sig = dp[dp.observed >= 10]
             if len(sig):
@@ -489,8 +539,8 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
     parity = _checkerboard(monthly["cell_id"]) if "cell_id" in monthly else None
     if parity is not None:
         try:
-            sr = fit_monthly_ratio(monthly[parity == 0], y0, y1)
-            sp = _predictions(sr, monthly[parity == 1], avail, last_full)
+            sr = fit_monthly_ratio(monthly[parity == 0], y0, y1, obs)
+            sp = _predictions(sr, monthly[parity == 1], avail, last_full, obs)
             ss = {m: _scores(p) for m, p in sp.items()}
             spatial = {"description": "fit on half the grid cells (checkerboard), tested on the other half",
                        "methods": [_brief(ss, m) for m in config.HARMONIZE_METHODS if m in ss],
@@ -502,7 +552,7 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
     return {
         "method": method,
         "scheme": "leave-one-year-out",
-        "noaa20_bridge": _validate_noaa20(monthly),
+        "noaa20_bridge": _validate_noaa20(monthly, obs),
         "train_years": [y0, y1],
         "test_years": [int(avail[0]), int(avail[-1])],
         "monthly": [{"year": int(r.year), "month": int(r.month), "predicted": round(float(r.predicted), 2),
@@ -521,23 +571,25 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
     }
 
 
-def harmonize_cells(monthly: pd.DataFrame, ratios: pd.DataFrame, snpp_end: tuple[int, int] | None = None) -> pd.DataFrame:
+def harmonize_cells(monthly: pd.DataFrame, ratios: pd.DataFrame, obs: pd.DataFrame | None = None) -> pd.DataFrame:
     """Per (cell, year, month) VIIRS-equivalent values, using the same sensor choice and conversion as
     `harmonize` (the FRP-stratified fit; quantile mapping only makes sense for area totals). For map layers."""
     cols = ["cell_id", "lat", "lon", "year", "month", "value"]
-    after = _after(monthly.year, monthly.month, snpp_end)
+    src, frac = record_source(monthly.year, monthly.month, obs)
+    monthly = monthly.assign(src=src, observed=frac)
     early = monthly[(monthly.family == "MODIS") & (monthly.year < config.OVERLAP_START_YEAR)]
     method = "ratio" if config.HARMONIZE_METHOD == "ratio" else "frp_strata"
     modis = convert_modis(early, ratios[[c for c in RATIO_COLS if c in ratios]], method)
     if "terra_scale" in modis:
         modis = modis.assign(value=modis.value * np.where(_terra_only(modis.year, modis.month),
                                                           modis.terra_scale.fillna(1.0), 1.0))
-    viirs = monthly[(monthly.family == "VIIRS") & (monthly.year >= config.OVERLAP_START_YEAR) & ~after]
-    viirs = viirs.assign(value=viirs.fire_cell_days.astype(float))
-    n20 = monthly[(monthly.family == "NOAA20") & after]
+    modis = modis.assign(value=_fill(modis.value.to_numpy(), modis.observed))
+    viirs = monthly[(monthly.family == "VIIRS") & (monthly.src == "viirs")]
+    viirs = viirs.assign(value=_fill(viirs.fire_cell_days.astype(float).to_numpy(), viirs.observed))
+    n20 = monthly[(monthly.family == "NOAA20") & (monthly.src == "noaa20_converted")]
     if len(n20) and "n20_scale" in ratios:
         n20 = n20.merge(ratios[["month", "n20_scale"]], on="month", how="left")
-        n20 = n20.assign(value=n20.fire_cell_days * n20.n20_scale)
+        n20 = n20.assign(value=_fill((n20.fire_cell_days * n20.n20_scale).to_numpy(), n20.observed))
     else:
         n20 = n20.assign(value=pd.Series(dtype=float))
     return pd.concat([modis[cols], viirs[cols], n20[cols]], ignore_index=True)

@@ -13,7 +13,8 @@ import pandas as pd
 
 from pipeline import config
 from pipeline.grid import cell_days_by_family
-from pipeline.harmonize import harmonize, harmonize_cells, ratios_for_region, raw_series, region_for_bbox
+from pipeline.harmonize import (harmonize, harmonize_cells, ratios_for_region, raw_series, record_source,
+                                region_for_bbox)
 
 from .area import Area, Bbox
 
@@ -32,7 +33,7 @@ def sql(query: str, args: list) -> pd.DataFrame:
 def _path(name: str):
     return {"monthly": config.GRID / "monthly.parquet", "hotspots": config.GRID / "hotspots.parquet",
             "cells_daily": config.GRID / "cells_daily.parquet", "events": config.GRID / "events.parquet",
-            "static": config.GRID / "static_sources.parquet",
+            "static": config.GRID / "static_sources.parquet", "observed": config.GRID / "observed.parquet",
             "ratios": config.HARMONIZED / "ratios.parquet",
             "validation": config.HARMONIZED / "validation.json"}[name]
 
@@ -80,18 +81,10 @@ def last_full_month() -> tuple[int, int] | None:
     return int(y), int(mo)
 
 
-def snpp_end() -> tuple[int, int] | None:
-    """Last full month of S-NPP coverage; later months come from NOAA-20 (S-NPP ended 2026-11-02)."""
-    m = meta().get("snpp_end")
-    return (int(m[:4]), int(m[5:7])) if m else None
-
-
-def _source_for(year, month) -> np.ndarray:
-    """Which sensor a month of the harmonized record comes from."""
-    year, month = np.asarray(year), np.asarray(month)
-    end = snpp_end()
-    after = (year * 12 + month > end[0] * 12 + end[1]) if end else np.zeros(len(year), bool)
-    return np.select([year < config.OVERLAP_START_YEAR, after], ["modis_converted", "noaa20_converted"], "viirs")
+def observed() -> pd.DataFrame | None:
+    """Share of each month's days each sensor group observed (outages, coverage); None if not built."""
+    p = _path("observed")
+    return sql("SELECT * FROM read_parquet(?)", [str(p)]) if p.exists() else None
 
 
 def latest_date() -> dt.date | None:
@@ -113,9 +106,9 @@ def calendar_frame(a: Area, start: int, end: int) -> tuple[pd.DataFrame, pd.Seri
     if monthly.empty:
         return pd.DataFrame(columns=["year", "month", "fire_cell_days", "lo", "hi", "source", "anomaly",
                                      "raw", "raw_source", "partial"]), pd.Series(dtype=float)
-    end_snpp = snpp_end()
-    h = harmonize(monthly, load_ratios(a), snpp_end=end_snpp)
-    h = h.merge(raw_series(monthly, end_snpp), on=["year", "month"], how="left")
+    obs = observed()
+    h = harmonize(monthly, load_ratios(a), obs=obs)
+    h = h.merge(raw_series(monthly, obs), on=["year", "month"], how="left")
     h = _fill_missing_months(h)
     lf = last_full_month()
     key = h.year * 12 + h.month
@@ -136,9 +129,9 @@ def _fill_missing_months(h: pd.DataFrame) -> pd.DataFrame:
     idx = pd.period_range(first, last, freq="M")
     full = pd.DataFrame({"year": idx.year, "month": idx.month})
     out = full.merge(h, on=["year", "month"], how="left")
-    src = _source_for(out.year, out.month)
+    src, frac = record_source(out.year, out.month, observed())
     raw_src = pd.Series(src).map({"modis_converted": "modis", "viirs": "viirs", "noaa20_converted": "noaa20"})
-    out = out.assign(source=out.source.fillna(pd.Series(src)),
+    out = out.assign(source=out.source.fillna(pd.Series(src)), observed=out.observed.fillna(pd.Series(frac)),
                      fire_cell_days=out.fire_cell_days.fillna(0.0), lo=out.lo.fillna(0.0), hi=out.hi.fillna(0.0))
     if "raw" in out:
         out = out.assign(raw=out.raw.fillna(0.0), raw_source=out.raw_source.fillna(raw_src))
@@ -184,6 +177,7 @@ def months_payload(h: pd.DataFrame) -> list[dict]:
              "lo": round(float(r.lo), 2), "hi": round(float(r.hi), 2), "source": r.source,
              "anomaly": None if pd.isna(r.anomaly) else round(float(r.anomaly), 3),
              "partial": bool(r.partial),
+             "observed": round(float(r.observed), 3) if "observed" in h and pd.notna(r.observed) else 1.0,
              "raw": round(float(r.raw), 2) if "raw" in h and pd.notna(r.raw) else None,
              "raw_source": getattr(r, "raw_source", None)} for r in h.itertuples()]
 
@@ -307,7 +301,13 @@ def current(a: Area, today: dt.date | None = None) -> dict:
     fam = fam.assign(year=d.dt.year, month=d.dt.month, strong=fam.frp_max >= config.STRONG_FRP_MW)
     per = fam.groupby(["cell_id", "year", "month", "family"], as_index=False).agg(
         fire_cell_days=("strong", "size"), strong_cell_days=("strong", "sum"))
-    h = harmonize(per, load_ratios(a), snpp_end=snpp_end())
+    obs = observed()
+    if obs is not None:  # in a days-1..N window, pick the sensor but don't rescale by whole-month outages
+        obs = obs.assign(frac=(obs.frac > 0).astype(float))
+    if live:  # the live month comes from NOAA-20 NRT
+        lv = pd.DataFrame({"family": ["VIIRS", "NOAA20"], "year": year, "month": month, "frac": [0.0, 1.0]})
+        obs = lv if obs is None else pd.concat([obs[~((obs.year == year) & (obs.month == month))], lv])
+    h = harmonize(per, load_ratios(a), obs=obs)
     start = pd.Timestamp(meta().get("min_date", "2001-01-01"))
     first_year = start.year + int(month < start.month)  # the record starts Nov 2000: earlier months unobserved
     years = pd.DataFrame({"year": range(first_year, year + 1)})
@@ -334,7 +334,7 @@ def cells(a: Area, start: int, end: int, limit: int) -> list[dict]:
     ratios = load_ratios(a)
     if m.empty or ratios is None:
         return []
-    v = harmonize_cells(m, ratios, snpp_end()).groupby(["lat", "lon"], as_index=False)["value"].sum()
+    v = harmonize_cells(m, ratios, observed()).groupby(["lat", "lon"], as_index=False)["value"].sum()
     v = v[v.value > 0].nlargest(limit, "value")
     return [{"lat": round(float(r.lat), 4), "lon": round(float(r.lon), 4), "cell_days": round(float(r.value), 1)}
             for r in v.itertuples()]

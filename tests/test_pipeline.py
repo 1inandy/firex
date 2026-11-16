@@ -229,8 +229,37 @@ def test_noaa20_bridges_the_snpp_shutdown():
     monthly = pd.DataFrame(rows)
     r = fit_monthly_ratio(monthly).set_index("month")
     assert r.loc[8, "n20_scale"] == pytest.approx(1.2)
-    h = harmonize(monthly, snpp_end=(2025, 12)).set_index(["year", "month"])
+    obs = pd.DataFrame([{"family": f, "year": y, "month": m, "frac": float(f == "NOAA20" or y <= 2025)}
+                        for f in ("VIIRS", "NOAA20") for y in range(2018, 2027) for m in (2, 8)])
+    h = harmonize(monthly, obs=obs).set_index(["year", "month"])
     assert h.loc[(2026, 8), "source"] == "noaa20_converted"
     assert h.loc[(2026, 8), "fire_cell_days"] == pytest.approx(24.0)
     assert h.loc[(2025, 8), "source"] == "viirs" and len(h.loc[(2025, 8)].shape) == 1  # no double count
-    assert set(raw_series(monthly, snpp_end=(2025, 12)).query("year == 2026").raw_source) == {"noaa20"}
+    assert set(raw_series(monthly, obs).query("year == 2026").raw_source) == {"noaa20"}
+
+
+def test_outages_are_excluded_from_fits_and_filled_in_the_record():
+    """A month where S-NPP missed days must not bias the NOAA-20 factor, and must not read as less fire."""
+    rows, obs = [], []
+    for year in range(2014, 2026):
+        for month in (2, 11):
+            truncated = (year, month) == (2024, 11)  # S-NPP delivered only a few days
+            rows += [dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="MODIS", fire_cell_days=50,
+                          strong_cell_days=0),
+                     dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="VIIRS",
+                          fire_cell_days=2 if truncated else 100, strong_cell_days=0)]
+            if year >= 2018:
+                rows.append(dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="NOAA20",
+                                 fire_cell_days=100, strong_cell_days=0))
+            for f in ("MODIS", "TERRA", "AQUA", "VIIRS", "NOAA20"):
+                frac = 0.1 if (f == "VIIRS" and truncated) else (0.0 if f == "NOAA20" and year < 2018 else 1.0)
+                obs.append(dict(family=f, year=year, month=month, frac=frac))
+    monthly, obs = pd.DataFrame(rows), pd.DataFrame(obs)
+    r = fit_monthly_ratio(monthly, obs=obs).set_index("month")
+    assert r.loc[11, "n20_scale"] == pytest.approx(1.0)  # without obs the truncated month would pull it down
+    assert fit_monthly_ratio(monthly).set_index("month").loc[11, "n20_scale"] < 0.9
+    h = harmonize(monthly, obs=obs).set_index(["year", "month"])
+    assert h.loc[(2024, 11), "source"] == "noaa20_converted" and h.loc[(2024, 11), "fire_cell_days"] == pytest.approx(100)
+    obs.loc[(obs.family == "NOAA20"), "frac"] = 0.0  # no NOAA-20 to swap in: scale S-NPP by the days observed
+    h = harmonize(monthly[monthly.family != "NOAA20"], fit_monthly_ratio(monthly, obs=obs), obs=obs)
+    assert h.set_index(["year", "month"]).loc[(2024, 11), "fire_cell_days"] == pytest.approx(20)
