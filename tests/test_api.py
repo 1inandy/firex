@@ -86,7 +86,8 @@ def test_end_to_end_endpoints(demo_data):
     assert prec["n_events"] > 0 and prec["largest"]["start"][5:7] == "08"
 
     val = c.get("/validation", params={"bbox": CA}).json()
-    assert val["region"] == "california" and val["test_years"][0] == 2021
+    assert val["region"] == "california" and val["scheme"] == "leave-one-year-out"
+    assert val["test_years"] == [2012, 2019] and val["drift_test"]["years"][0] == 2020
     assert val["annual_abs_error_pct"] < val["baseline"]["annual_abs_error_pct"]
 
     cells = c.get("/cells", params={"bbox": CA, "limit": 10}).json()["cells"]
@@ -155,7 +156,8 @@ def test_validation_compares_methods_and_flags_drift(demo_data):
     v = demo_data.get("/validation", params={"bbox": CA}).json()
     assert [m["method"] for m in v["methods"]] == ["ratio", "frp_strata", "quantile"]
     assert v["drift_from"] == {"Terra": 2020, "Aqua": 2022}
-    assert all(r["modis_drift"] for r in v["annual"])  # test years 2021+ are all drift years
+    assert not any(r["modis_drift"] for r in v["annual"])  # held-out years predate the drift
+    assert all(r["modis_drift"] for r in v["drift_test"]["annual"])  # stress test: drift years only
 
 
 def test_alerts_lifecycle(demo_data, tmp_path, monkeypatch):
