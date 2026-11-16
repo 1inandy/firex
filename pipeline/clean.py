@@ -22,12 +22,13 @@ def _minutes(acq_time: pd.Series) -> np.ndarray:
 
 
 def swath_duplicates(df: pd.DataFrame) -> pd.Series:
-    """True for detections that repeat an earlier one from the same overpass less than a pixel away.
+    """True for detections that repeat a kept one from the same overpass less than a pixel away.
 
     Neighbouring scan lines overlap toward the swath edge (the "bow-tie" effect), so one fire can be
-    reported twice by the same satellite within seconds. We link detections with the same satellite,
-    date and day/night, at most DEDUPE_MINUTES apart and closer than the sensor's pixel size
-    (DEDUPE_KM), and keep only the first of each linked pair.
+    reported twice by the same satellite within seconds. Detections with the same satellite, date and
+    day/night, at most DEDUPE_MINUTES apart and closer than the sensor's pixel size (DEDUPE_KM), are
+    duplicates. Brighter detections (higher FRP) are kept first, and a detection is only dropped against
+    one that is kept, so a chain of overlapping pixels never erases a pixel that is a full pixel away.
     """
     if df.empty:
         return pd.Series(False, index=df.index)
@@ -37,29 +38,35 @@ def swath_duplicates(df: pd.DataFrame) -> pd.Series:
     lat = df["latitude"].to_numpy(float)
     lon = df["longitude"].to_numpy(float)
     coslat = np.cos(np.radians(lat))
-    # Hash points into cells of size = tolerance, so true neighbours are in the same or adjacent cell.
-    pts = pd.DataFrame({
-        "row": np.arange(len(df)),
-        "key": pd.factorize(pd.Series(df["sensor"].astype(str).to_numpy()) + "|"
-                            + df["satellite"].astype(str).to_numpy() + "|"
-                            + df["acq_date"].astype(str).to_numpy() + "|"
-                            + df["daynight"].astype(str).to_numpy())[0],
-        "ci": np.floor(lat / tol_deg).astype(np.int64),
-        "cj": np.floor(lon * coslat / tol_deg).astype(np.int64),
-    })
     minutes = _minutes(df["acq_time"])
-    drop = np.zeros(len(df), dtype=bool)
+    key = pd.factorize(pd.Series(df["sensor"].astype(str).to_numpy()) + "|" + df["satellite"].astype(str).to_numpy()
+                       + "|" + df["acq_date"].astype(str).to_numpy() + "|" + df["daynight"].astype(str).to_numpy())[0]
+    # Priority: brightest first, then a fixed spatial order, so the result doesn't depend on input order.
+    order = np.lexsort((lon, lat, -df["frp"].to_numpy(float), minutes, key))
+    rank = np.empty(len(df), dtype=np.int64)
+    rank[order] = np.arange(len(df))
+    # Hash into cells one tolerance tall and wide enough in longitude at the highest latitude present,
+    # so any two points closer than the tolerance land in the same or adjacent cells.
+    lon_width = tol_deg / np.cos(np.radians(min(np.abs(lat).max(), 80.0)))
+    pts = pd.DataFrame({"row": np.arange(len(df)), "key": key,
+                        "ci": np.floor(lat / tol_deg).astype(np.int64),
+                        "cj": np.floor(lon / lon_width).astype(np.int64)})
+    pairs = []
     for di in (-1, 0, 1):
         for dj in (-1, 0, 1):
-            shifted = pts.assign(ci=pts.ci + di, cj=pts.cj + dj)
-            pairs = pts.merge(shifted, on=["key", "ci", "cj"], suffixes=("_a", "_b"))
-            pairs = pairs[pairs.row_a < pairs.row_b]
-            if pairs.empty:
-                continue
-            a, b = pairs.row_a.to_numpy(), pairs.row_b.to_numpy()
-            dkm = KM_PER_DEG * np.hypot(lat[a] - lat[b], (lon[a] - lon[b]) * coslat[a])
+            m = pts.merge(pts.assign(ci=pts.ci + di, cj=pts.cj + dj), on=["key", "ci", "cj"], suffixes=("_a", "_b"))
+            a, b = m.row_a.to_numpy(), m.row_b.to_numpy()
+            keep = rank[a] < rank[b]
+            a, b = a[keep], b[keep]
+            dkm = KM_PER_DEG * np.hypot(lat[a] - lat[b], (lon[a] - lon[b]) * (coslat[a] + coslat[b]) / 2)
             close = (dkm < tol[a]) & (np.abs(minutes[a] - minutes[b]) <= config.DEDUPE_MINUTES)
-            drop[b[close]] = True
+            pairs.append(np.c_[a[close], b[close]])
+    pairs = np.concatenate(pairs)
+    drop = np.zeros(len(df), dtype=bool)
+    # Visit pairs by the rank of the later detection: its earlier partner's fate is already decided.
+    for a, b in pairs[np.argsort(rank[pairs[:, 1]], kind="stable")]:
+        if not drop[a]:
+            drop[b] = True
     return pd.Series(drop, index=df.index)
 
 
