@@ -93,13 +93,14 @@ def _quantile_totals(cell_months: pd.DataFrame, table: np.ndarray) -> pd.DataFra
     return (cell_months.assign(value=mapped).groupby(["year", "month"], as_index=False)["value"].sum())
 
 
-def _fit_quantile(monthly: pd.DataFrame, first_year: int, last_year: int | None) -> pd.DataFrame | None:
+def _fit_quantile(monthly: pd.DataFrame, first_year: int, last_year: int | None,
+                  obs: pd.DataFrame | None = None) -> pd.DataFrame | None:
     """QM columns (month + QM_COLS) fit on the overlap years, or None without per-cell data."""
     if "cell_id" not in monthly:
         return None
     ov = monthly[(monthly.year >= first_year) & ((monthly.year <= last_year) if last_year else True)]
     cm = _cell_months(ov)
-    cm = cm[cm.fire_cell_days > 0]
+    cm = _drop_incomplete(cm[cm.fire_cell_days > 0], obs, {"MODIS": 1.0, "VIIRS": 1.0, "TERRA": 0.9, "AQUA": 0.9})
     mod, vii = cm[cm.family == "MODIS"], cm[cm.family == "VIIRS"]
     if len(mod) < config.QM_MIN_SAMPLES or len(vii) < config.QM_MIN_SAMPLES:
         return None
@@ -173,7 +174,8 @@ def _frac(obs: pd.DataFrame | None, fam: str, year, month) -> np.ndarray:
     if obs is None or key.empty:
         return np.ones(len(key))
     o = obs.loc[obs.family == fam, ["year", "month", "frac"]]
-    return key.merge(o, on=["year", "month"], how="left").frac.fillna(1.0).to_numpy(float)
+    # Inside an observation table, a missing entry means the sensor was not delivering (e.g. before launch).
+    return key.merge(o, on=["year", "month"], how="left").frac.fillna(0.0).to_numpy(float)
 
 
 def _drop_incomplete(df: pd.DataFrame, obs: pd.DataFrame | None, fams) -> pd.DataFrame:
@@ -252,7 +254,7 @@ def fit_monthly_ratio(monthly: pd.DataFrame, first_year: int = config.CONVERSION
     out = pd.DataFrame(rows, columns=RATIO_COLS[:11])
     n20 = _noaa20_scale(monthly, obs)
     out = out.merge(n20, on="month", how="left") if n20 is not None else out
-    qm = _fit_quantile(monthly, first_year, last_year)
+    qm = _fit_quantile(monthly, first_year, last_year, obs)
     return out.merge(qm, on="month", how="left") if qm is not None else out
 
 
@@ -509,7 +511,9 @@ def _tile_errors(ratios: pd.DataFrame, monthly: pd.DataFrame, year: int, deg: fl
 
 
 def _small_area(tiles: pd.DataFrame) -> dict | None:
-    """Annual error across tiles and the 10–90% band of monthly observed ÷ predicted, out of sample."""
+    """Out-of-sample error on single tiles, and a band that covers them: multiplicative 10–90% of observed ÷
+    predicted, plus an additive allowance (90th percentile of what VIIRS saw in tile-months where MODIS saw
+    nothing, which no multiple of zero can cover). `band_coverage_pct` is measured on all active tile-months."""
     if tiles.empty:
         return None
     yr = tiles.groupby(["tile", "year"]).agg(p=("predicted", "sum"), o=("observed", "sum"))
@@ -519,9 +523,16 @@ def _small_area(tiles: pd.DataFrame) -> dict | None:
         return None
     err = (100 * (yr.p - yr.o) / yr.o).abs()
     r = mo.observed / mo.predicted
+    lo, hi = float(r.quantile(0.1)), float(r.quantile(0.9))
+    zero = tiles[(tiles.predicted == 0) & (tiles.observed > 0)].observed
+    add = float(zero.quantile(0.9)) if len(zero) else 0.0
+    act = tiles[(tiles.observed > 0) | (tiles.predicted > 0)]
+    inside = (act.observed >= act.predicted * lo) & (act.observed <= act.predicted * hi + add)
     return {"median_annual_abs_error_pct": round(float(err.median()), 1),
             "p90_annual_abs_error_pct": round(float(err.quantile(0.9)), 1),
-            "band": [round(float(r.quantile(0.1)), 3), round(float(r.quantile(0.9)), 3)],
+            "band": [round(lo, 3), round(hi, 3)], "band_add_per_tile": round(add, 1),
+            "band_coverage_pct": round(float(inside.mean() * 100), 1),
+            "zero_prediction_share_pct": round(float(len(zero) / max(len(act), 1) * 100), 1),
             "n_tile_years": int(len(yr))}
 
 

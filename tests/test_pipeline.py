@@ -229,8 +229,10 @@ def test_noaa20_bridges_the_snpp_shutdown():
     monthly = pd.DataFrame(rows)
     r = fit_monthly_ratio(monthly).set_index("month")
     assert r.loc[8, "n20_scale"] == pytest.approx(1.2)
-    obs = pd.DataFrame([{"family": f, "year": y, "month": m, "frac": float(f == "NOAA20" or y <= 2025)}
-                        for f in ("VIIRS", "NOAA20") for y in range(2018, 2027) for m in (2, 8)])
+    obs = pd.DataFrame([{"family": f, "year": y, "month": m,
+                         "frac": float(f != "VIIRS" or y <= 2025) * float(f != "NOAA20" or y >= 2018)}
+                        for f in ("MODIS", "TERRA", "AQUA", "VIIRS", "NOAA20")
+                        for y in range(2012, 2027) for m in (2, 8)])
     h = harmonize(monthly, obs=obs).set_index(["year", "month"])
     assert h.loc[(2026, 8), "source"] == "noaa20_converted"
     assert h.loc[(2026, 8), "fire_cell_days"] == pytest.approx(24.0)
