@@ -28,6 +28,7 @@ const state = {
   from: null, to: null, // "YYYY-MM"
   calendar: null,
   current: null,
+  events: null,         // events from /events for the current analysis (findings + map callouts)
   calMode: "counts",
   gen: 0,               // request generation, to drop stale responses
   regions: [],
@@ -145,23 +146,33 @@ const fmtX = (r) => (r < 2 ? `${r.toFixed(2)}×` : fmtRatio(r));
 const AREA_NAMES = { bbox: "Rectangle", poly: "Polygon", circle: "Circle" };
 
 // ───────────────────────── map ─────────────────────────
+const NARROW = matchMedia("(max-width: 900px)");
+const REDUCED = matchMedia("(prefers-reduced-motion: reduce)");
 const map = L.map("map", { preferCanvas: true, worldCopyJump: true, zoomSnap: 0.25 }).setView([37, -119.5], 5);
-// Esri dark-gray canvas (no API key needed); reference labels drawn above the data layers.
-const ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas";
-L.tileLayer(`${ESRI}/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}`, {
-  attribution: 'Tiles &copy; <a href="https://www.esri.com">Esri</a>, HERE, Garmin, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  maxZoom: 16,
+// OpenTopoMap shaded relief (no API key needed).
+L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="https://www.earthdata.nasa.gov/data/instruments/srtm">SRTM</a> | map style &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)',
+  maxZoom: 17,
 }).addTo(map);
-map.createPane("labels").style.zIndex = 450;
-map.getPane("labels").style.pointerEvents = "none";
-L.tileLayer(`${ESRI}/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}`, { pane: "labels", maxZoom: 16 }).addTo(map);
 new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById("map"));
 
-const ACCENT = "#f0a04b";
-const SHAPE = { color: ACCENT, weight: 2, fill: false, dashArray: "6 4" };
+/** Padding that keeps a fitted shape clear of the floating cards, the findings rail and the drawer. */
+function mapPad() {
+  if (NARROW.matches) return { paddingTopLeft: [20, 20], paddingBottomRight: [20, 20] };
+  const w = innerWidth, h = innerHeight;
+  const left = $(".hud-left").getBoundingClientRect().right + 16;
+  const rail = $("#findings");
+  const right = (rail.hidden ? 0 : w - rail.getBoundingClientRect().left) + 16;
+  const bottom = Math.min(h - $("#analysis").getBoundingClientRect().top, h * 0.5) + $("#legend").offsetHeight + 60;
+  return { paddingTopLeft: [Math.min(left, w * 0.4), 84], paddingBottomRight: [Math.min(right, w * 0.35), bottom] };
+}
+
+const INK = "#0f172a";
+const SHAPE = { color: INK, weight: 2.5, fill: false, dashArray: "7 5" };
 const drawn = new L.FeatureGroup().addTo(map);
 const cellsLayer = L.layerGroup();
 const eventLayer = L.layerGroup().addTo(map);
+const calloutLayer = L.layerGroup().addTo(map);
 map.addControl(new L.Control.Draw({
   position: "topleft",
   draw: {
@@ -185,47 +196,44 @@ map.on(L.Draw.Event.CREATED, (e) => {
     const b = lyr.getBounds();
     setArea({ kind: "bbox", bbox: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()] });
   }
+  setFormOpen(false);
   analyze();
 });
 
-// cell layer legend
-const legend = L.control({ position: "bottomright" });
-let legendDiv;
-legend.onAdd = () => (legendDiv = L.DomUtil.create("div", "map-legend"));
-legend.addTo(map);
-legendDiv.hidden = true;
-// Map ramp starts at 0.2 so the darkest viridis purples stay visible on the dark basemap.
-const mapT = (v, max) => 0.2 + 0.8 * countT(v, max);
+// cell layer legend (the ramp block of the legend panel)
+const legendDiv = $("#legend-ramp");
+// Full viridis range: the dark end reads well on the light relief basemap.
+const mapT = (v, max) => countT(v, max);
 function renderMapLegend(max) {
-  if (!max) { legendDiv.hidden = true; return; }
-  const stops = Array.from({ length: 11 }, (_, i) => viridis(0.2 + 0.8 * (i / 10))).join(",");
+  if (!max) { legendDiv.hidden = true; legendDiv.replaceChildren(); return; }
+  const stops = Array.from({ length: 11 }, (_, i) => viridis(i / 10)).join(",");
   const ticks = niceTicks(max, 3).filter((v, i, a) => i === 0 || countT(v, max) - countT(a[i - 1], max) > 0.3);
-  legendDiv.innerHTML = "";
-  legendDiv.append(
-    el("div", { text: "Harmonized fire cell-days per 0.05° cell" }),
+  legendDiv.replaceChildren(
+    el("div", { class: "legend-title", text: "Harmonized fire cell-days per 0.05° cell" }),
     el("div", { class: "bar", style: `background:linear-gradient(90deg,${stops})`, role: "img", "aria-label": `Color scale from 0 to ${fmt(max)} harmonized fire cell-days, square-root` }),
-    el("div", { class: "ticks", style: "position:relative;height:12px;display:block" },
-      ticks.map((v) => el("span", { style: `position:absolute;left:${countT(v, max) * 100}%;transform:translateX(-50%)`, text: fmt(v) })),
+    el("div", { class: "ticks" },
+      ticks.map((v) => el("span", { style: `left:${countT(v, max) * 100}%`, text: fmt(v) })),
     ),
   );
   legendDiv.hidden = !$("#cells-toggle").checked;
 }
 $("#cells-toggle").addEventListener("change", (e) => {
-  if (e.target.checked) { cellsLayer.addTo(map); if (legendDiv.innerHTML) legendDiv.hidden = false; }
+  if (e.target.checked) { cellsLayer.addTo(map); if (legendDiv.childElementCount) legendDiv.hidden = false; }
   else { map.removeLayer(cellsLayer); legendDiv.hidden = true; }
 });
 if ($("#cells-toggle").checked) cellsLayer.addTo(map);
 
 function drawSelection(a, fit = true) {
   drawn.clearLayers();
-  const opts = { ...SHAPE, interactive: false };
   const b = a.bbox;
-  const shape = a.kind === "circle" ? L.circle([a.circle[1], a.circle[0]], { ...opts, radius: a.circle[2] * 1000 })
-    : a.kind === "poly" ? L.polygon(a.poly.map(([x, y]) => [y, x]), opts)
-    : L.rectangle([[b[1], b[0]], [b[3], b[2]]], opts);
-  drawn.addLayer(shape);
+  const mk = (o) => (a.kind === "circle" ? L.circle([a.circle[1], a.circle[0]], { ...o, radius: a.circle[2] * 1000 })
+    : a.kind === "poly" ? L.polygon(a.poly.map(([x, y]) => [y, x]), o)
+    : L.rectangle([[b[1], b[0]], [b[3], b[2]]], o));
+  // white casing under the dashed ink line keeps the outline readable on any terrain colour
+  drawn.addLayer(mk({ color: "#ffffff", weight: 5, opacity: 0.85, fill: false, interactive: false }));
+  drawn.addLayer(mk({ ...SHAPE, interactive: false }));
   map.invalidateSize();
-  if (fit) map.fitBounds(L.latLngBounds([[b[1], b[0]], [b[3], b[2]]]), { padding: [24, 24], maxZoom: 10, animate: !matchMedia("(prefers-reduced-motion: reduce)").matches });
+  if (fit) map.fitBounds(L.latLngBounds([[b[1], b[0]], [b[3], b[2]]]), { ...mapPad(), maxZoom: 10, animate: !REDUCED.matches });
 }
 
 // ───────────────────────── form ─────────────────────────
@@ -236,7 +244,16 @@ form.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("cha
   form.querySelectorAll(".mode-pane").forEach((p) => (p.hidden = p.dataset.mode !== mode()));
 }));
 
+// The area controls live in a collapsible section of the area card.
+const areaToggle = $("#area-toggle");
+function setFormOpen(open) {
+  form.hidden = !open;
+  areaToggle.setAttribute("aria-expanded", String(open));
+}
+areaToggle.addEventListener("click", () => setFormOpen(form.hidden));
+
 function showFormError(msg, field) {
+  if (msg) setFormOpen(true);
   $("#form-error").textContent = msg || "";
   Object.values(fields).forEach((f) => f.removeAttribute("aria-invalid"));
   if (field) { field.setAttribute("aria-invalid", "true"); field.focus(); }
@@ -261,6 +278,23 @@ function setArea(a) {
     : a.kind === "poly" ? `${a.poly.length} vertices` : bboxStr(b);
   $("#area-readout").textContent = `${AREA_NAMES[a.kind]} ${desc} · ≈ ${fmt(shapeKm2(state.area), 0)} km²`;
   document.querySelectorAll(".chip").forEach((ch) => ch.setAttribute("aria-pressed", String(a.kind === "bbox" && ch.dataset.bbox === bboxStr(b))));
+  renderAreaCard();
+}
+
+/** Area card title + stats line: region name (or "Custom area") · km² · date range · span. */
+function renderAreaCard() {
+  const a = state.area;
+  if (!a) return;
+  const region = a.kind === "bbox" && state.regions.find((r) => bboxStr(r.bbox) === bboxStr(a.bbox));
+  $("#area-name").textContent = region ? region.name : "Custom area";
+  $("#area-name").classList.toggle("long", !!region && region.name.length > 18);
+  const parts = [`${fmt(shapeKm2(a), 0)} km²`];
+  const f = fields.from.value, t = fields.to.value;
+  if (validYM(f) && validYM(t) && f <= t) {
+    const n = (Number(t.slice(0, 4)) - Number(f.slice(0, 4))) * 12 + Number(t.slice(5, 7)) - Number(f.slice(5, 7)) + 1;
+    parts.push(`${ymLabel(f)} – ${ymLabel(t)}`, n >= 12 ? `${Math.round(n / 12)} yr${Math.round(n / 12) === 1 ? "" : "s"}` : `${n} mo`);
+  }
+  $("#area-stats").textContent = parts.join(" · ");
 }
 
 form.addEventListener("submit", (e) => {
@@ -302,7 +336,7 @@ function dateError() {
 async function analyze({ fit = true } = {}) {
   if (!state.bbox) return;
   if (!state.health?.data_ready) {
-    showFormError("No data built yet. See the banner above for setup steps.");
+    showFormError("No data built yet. See the banner for setup steps.");
     return;
   }
   const dErr = dateError();
@@ -316,11 +350,18 @@ async function analyze({ fit = true } = {}) {
   const url = new URLSearchParams(apiQ ? { api: apiQ } : {});
   for (const [k, v] of Object.entries(params)) url.set(k, v);
   history.replaceState(null, "", "?" + url.toString().replace(/%2C/g, ",").replace(/%3B/g, ";"));
+  document.body.classList.remove("no-area");
+  $("#card-current").hidden = false;
+  $("#findings").hidden = false;
+  syncPanels();
+  renderAreaCard();
   drawSelection(state.area, fit);
   eventLayer.clearLayers();
+  calloutLayer.clearLayers();
+  state.calendar = null; state.events = null;
+  findingsUi.dismissed.clear(); findingsUi.expanded = false;
+  renderFindings(true);
 
-  $("#empty").hidden = true;
-  $("#cards").hidden = false;
   updateDownloads(params);
   loadValidation(bbox);
   for (const id of ["card-current", "card-precedent", "card-summary", "card-events"]) setLoading(id);
@@ -328,6 +369,8 @@ async function analyze({ fit = true } = {}) {
   setLoading("card-season");
   $("#cal-table").replaceChildren();
   $("#current-source").textContent = "";
+  $("#current-status").textContent = "";
+  $("#card-current").dataset.level = "info";
   $("#events-count").textContent = "";
   body("card-brief").replaceChildren(el("div", { class: "state", text: "Generate a briefing for this area on demand." }));
   $("#brief-btn").disabled = false;
@@ -335,7 +378,7 @@ async function analyze({ fit = true } = {}) {
   const live = (fn) => (v) => { if (gen === state.gen) fn(v); };
   const fail = (id) => (e) => { if (gen === state.gen && e.name !== "AbortError") setError(id, e); };
 
-  const calP = getJSON("/calendar", params).then(live((d) => { state.calendar = d; renderCalendar(); renderSummary(); }))
+  const calP = getJSON("/calendar", params).then(live((d) => { state.calendar = d; renderCalendar(); renderSummary(); renderFindings(); }))
     .catch((e) => { fail("card-calendar")(e); fail("card-summary")(e); fail("card-season")(e); });
   const curP = getJSON("/current", ap).then(live((d) => { state.current = d; renderCurrent(d); return d; }))
     .catch((e) => { fail("card-current")(e); return null; });
@@ -357,45 +400,55 @@ function updateDownloads(params) {
 
 // ───────────────────────── renderers ─────────────────────────
 function renderCurrent(d) {
-  const b = body("card-current");
+  const card = $("#card-current"), status = $("#current-status"), foot = $("#current-source");
   if (!d || d.value == null) return setEmpty("card-current", "No current-month data for this area.");
-  $("#current-source").textContent = d.live ? "Live · NOAA-20 NRT" : "Archive";
-  $("#current-source").classList.toggle("live", !!d.live);
   const mName = MONTHS_LONG[d.month - 1];
-  const kids = [
-    el("div", { class: "cur-head", text: `${mName} ${d.year}${d.partial ? ` · first ${d.days_covered ?? "?"} days` : ""}` }),
-    el("div", { class: "cur-big" }, el("span", { class: "cur-value", text: fmt(d.value) }), el("span", { class: "cur-unit", text: "fire cell-days" })),
-  ];
-  let verdict, cls = "";
+  const soFar = d.partial ? " so far" : "";
+  const counts = `${fmt(d.value)} fire cell-days${soFar}`;
   const isRecord = d.highest_since == null && d.rank === 1;
-  if (!(d.median > 0) || d.ratio == null) {
-    verdict = d.value > 0 ? `No fires in a typical ${mName}; this is unusual${isRecord ? ", the highest on record" : ""}.` : `Quiet, as usual: a typical ${mName} has no fire activity here.`;
-    cls = d.value > 0 ? "hot" : "";
-  } else if (d.ratio > 1.15) {
-    verdict = `${fmtRatio(d.ratio)} normal`;
-    if (isRecord) verdict += `, the highest ${mName} on record`;
-    else if (d.highest_since != null) verdict += `, highest since ${d.highest_since}`;
-    cls = "hot";
-  } else if (d.ratio < 0.85) {
-    verdict = `${fmtRatio(d.ratio)} normal, quieter than usual`;
-    cls = "cool";
+  const hasRatio = d.median > 0 && d.ratio != null;
+  // Status label: always text, the colour only repeats it (red ≥ 2×, amber 1.5–2×, blue otherwise).
+  let level = "info", label, sentence;
+  if (!hasRatio) {
+    level = d.value > 0 ? "warning" : "info";
+    label = d.value > 0 ? "Unusual" : "Quiet";
+    sentence = d.value > 0
+      ? `${mName} ${d.year} is unusual: ${counts} where a typical ${mName} has none${isRecord ? ", the highest on record" : ""}`
+      : `${mName} ${d.year} is quiet, as usual: a typical ${mName} has no fire activity here`;
   } else {
-    verdict = `${fmtRatio(d.ratio)} normal, about typical for ${mName}`;
+    const shown = Math.round(d.ratio * 10) / 10; // classify on the ratio as displayed
+    level = shown >= 2 ? "critical" : shown >= 1.5 ? "warning" : "info";
+    label = `${fmtRatio(d.ratio)} normal`;
+    const vs = `${counts} vs a median of ${fmt(d.median)}`;
+    sentence = d.ratio > 1.15 ? `${mName} ${d.year} is running above normal: ${vs}`
+      : d.ratio < 0.85 ? `${mName} ${d.year} is quieter than usual: ${vs}`
+      : `${mName} ${d.year} is about typical: ${vs}`;
   }
-  kids.push(el("div", { class: `cur-verdict ${cls}`, text: verdict + "." }));
-  kids.push(el("div", { class: "cur-meta" }, "Historical median for ", d.partial ? `the same ${d.days_covered ?? ""} days of ${mName}` : mName, ": ", el("strong", { text: fmt(d.median) })));
-  if (d.rank != null && d.n_years) kids.push(el("div", { class: "cur-meta" }, "Ranks ", el("strong", { text: `#${d.rank}` }), ` of ${d.n_years} ${mName}s on record.`));
-  if (d.median > 0 && d.ratio != null) {
+  card.dataset.level = level;
+  status.textContent = label;
+  foot.textContent = `${d.live ? "Live · NOAA-20 NRT" : "Archive"} · ${MONTHS[d.month - 1]} ${d.year}`;
+  foot.classList.toggle("live", !!d.live);
+
+  const why = [];
+  if (d.rank != null && d.n_years) why.push(el("span", {}, "Ranks ", el("strong", { text: `#${d.rank}` }), ` of ${d.n_years} ${mName}s on record`));
+  if (isRecord) why.push(el("span", {}, "the ", el("strong", { text: `highest ${mName}` }), " on record"));
+  else if (d.highest_since != null && d.ratio > 1.15) why.push(el("span", {}, "highest since ", el("strong", { text: String(d.highest_since) })));
+  if (d.partial) why.push(el("span", {}, el("strong", { text: `${d.days_covered ?? "some"} days` }), ` of data so far, compared with the same days of ${mName} in past years (the total will rise as the month continues)`));
+  else if (hasRatio) why.push(el("span", {}, "full month, compared with the median ", mName));
+  const kids = [el("p", { class: "hero-action", text: sentence + "." })];
+  const box = el("div", { class: "hero-why" }, why.flatMap((n, i) => (i ? [" · ", n] : [n])));
+  if (hasRatio) {
     // log-scale ratio bar, ¼× … 4×, 1× in the middle
     const pos = Math.max(0, Math.min(1, (Math.log2(Math.max(d.ratio, 1e-3)) + 2) / 4));
-    kids.push(el("div", { class: "ratio-bar", role: "img", "aria-label": `${fmtRatio(d.ratio)} the historical median` },
-      el("div", { class: "fill", style: `width:${pos * 100}%;background:${d.ratio >= 1 ? "var(--accent)" : "#6b9bc7"}` }),
-      el("div", { class: "mid", style: "left:calc(50% - 1px)" })));
-    kids.push(el("div", { class: "ratio-ticks", "aria-hidden": "true" }, ["¼×", "½×", "1× median", "2×", "4×+"].map((t) => el("span", { text: t }))));
+    box.append(
+      el("div", { class: "ratio-bar", role: "img", "aria-label": `${fmtRatio(d.ratio)} the historical median` },
+        el("div", { class: "fill", style: `width:${pos * 100}%` }),
+        el("div", { class: "mid", style: "left:calc(50% - 1px)" })),
+      el("div", { class: "ratio-ticks", "aria-hidden": "true" }, ["¼×", "½×", "1× median", "2×", "4×+"].map((t) => el("span", { text: t }))));
   }
-  if (d.partial) kids.push(el("div", { class: "note", text: `Month in progress: ${d.days_covered ?? "some"} days of data so far, compared with days 1–${d.days_covered ?? "?"} of ${mName} in past years. The total will rise as the month continues.` }));
-  if (d.note) kids.push(el("div", { class: "note", text: d.note }));
-  b.replaceChildren(...kids);
+  kids.push(box);
+  if (d.note) kids.push(el("p", { class: "note hero-note", text: d.note }));
+  body("card-current").replaceChildren(...kids);
 }
 
 function renderPrecedent(d) {
@@ -419,7 +472,7 @@ function renderPrecedent(d) {
     lg?.peak_frp != null ? [el("dt", { text: "Its peak FRP" }), el("dd", { text: `${fmt(lg.peak_frp, 0)} MW` })] : null,
   );
   kids.push(dl);
-  if (lg?.bbox) kids.push(el("button", { type: "button", class: "btn btn-ghost btn-sm", style: "margin-top:8px", onclick: () => showEvent(lg), text: "Show it on the map" }));
+  if (lg?.bbox) kids.push(el("button", { type: "button", class: "btn btn-ghost btn-sm", style: "margin-top:8px", onclick: () => selectEvent(lg), text: "Show it on the map" }));
   body("card-precedent").replaceChildren(el("div", { class: "prec" }, kids));
 }
 
@@ -440,7 +493,7 @@ function renderCalendar() {
   renderHandoff(d.handoff);
   const small = $("#small-area-note");
   small.hidden = !(d.area_km2 < 100000 && d.months.some((m) => m.source === "modis_converted"));
-  if (!small.hidden) small.textContent = `Small area (≈ ${fmt(d.area_km2, 0)} km²): areas under ~100,000 km² convert less reliably, so MODIS-converted months here carry the wider small-area 10–90% band (see the validation section below).`;
+  if (!small.hidden) small.textContent = `Small area (≈ ${fmt(d.area_km2, 0)} km²): areas under ~100,000 km² convert less reliably, so MODIS-converted months here carry the wider small-area 10–90% band (see the Method tab).`;
   wireCalendar(host, tip, by, years);
   renderCalTable(d, years, by);
 }
@@ -640,8 +693,8 @@ function renderCells(d) {
   const r = cellRadius();
   for (const c of cells) {
     L.circleMarker([c.lat, c.lon], {
-      radius: r, stroke: false, fillColor: viridis(mapT(c.cell_days, max)), fillOpacity: 0.9,
-    }).bindTooltip(`${fmt(c.cell_days)} harmonized fire cell-days<br><span style="color:#8b95a1">${c.lat.toFixed(3)}, ${c.lon.toFixed(3)}</span>`, { direction: "top" })
+      radius: r, color: INK, weight: 0.4, opacity: 0.55, fillColor: viridis(mapT(c.cell_days, max)), fillOpacity: 0.92,
+    }).bindTooltip(`${fmt(c.cell_days)} harmonized fire cell-days<br><span style="color:#94a3b8">${c.lat.toFixed(3)}, ${c.lon.toFixed(3)}</span>`, { direction: "top" })
       .addTo(cellsLayer);
   }
   renderMapLegend(max);
@@ -651,18 +704,17 @@ map.on("zoomend", () => { const r = cellRadius(); cellsLayer.eachLayer((l) => l.
 // events -------------------------------------------------------------
 function renderEvents(d) {
   const evs = d.events || [];
+  state.events = evs;
+  renderCallouts(evs);
+  renderFindings();
   $("#events-count").textContent = evs.length ? `${evs.length} shown` : "";
   if (!evs.length) return setEmpty("card-events", "No fire events in this area and date range.");
   const list = el("div", { class: "events", role: "list" },
     el("div", { class: "events-head", "aria-hidden": "true" }, ["Start", "Days", "Footprint km²", "Peak FRP", "Cell-days"].map((t) => el("span", { text: t }))),
     evs.slice(0, 15).map((ev) => el("div", { role: "listitem" }, el("button", {
-      type: "button", class: "event", "aria-pressed": "false",
+      type: "button", class: "event", "aria-pressed": "false", "data-id": ev.id,
       "aria-label": `Fire event first detected ${ev.start}, detected over ${ev.duration_days} days, ${fmt(ev.cell_days, 0)} fire cell-days, detection footprint ${fmt(ev.area_km2)} square kilometres, peak FRP ${fmt(ev.peak_frp, 0)} megawatts. Show on map.`,
-      onclick: (e) => {
-        document.querySelectorAll(".event").forEach((b) => b.setAttribute("aria-pressed", "false"));
-        e.currentTarget.setAttribute("aria-pressed", "true");
-        showEvent(ev);
-      },
+      onclick: () => selectEvent(ev),
     }, el("span", { text: ev.start }), el("span", { text: fmt(ev.duration_days, 0) }), el("span", { text: fmt(ev.area_km2, 0) }),
     el("span", { text: ev.peak_frp != null ? `${fmt(ev.peak_frp, 0)} MW` : "–" }), el("span", { text: fmt(ev.cell_days, 0) })))),
   );
@@ -673,11 +725,191 @@ function showEvent(ev) {
   eventLayer.clearLayers();
   const b = ev.bbox;
   if (!b) return;
-  const rect = L.rectangle([[b[1], b[0]], [b[3], b[2]]], { color: "#ffffff", weight: 2, fillColor: ACCENT, fillOpacity: 0.12 })
+  const rect = L.rectangle([[b[1], b[0]], [b[3], b[2]]], { color: "#1d4ed8", weight: 2.5, fillColor: "#3b82f6", fillOpacity: 0.14 })
     .bindTooltip(`Detections from ${ev.start} to ${ev.end || "?"} · over ${fmt(ev.duration_days, 0)} days · footprint ${fmt(ev.area_km2, 0)} km²`, { permanent: false })
     .addTo(eventLayer);
-  map.flyToBounds(rect.getBounds(), { padding: [40, 40], maxZoom: 11, duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.8 });
+  map.flyToBounds(rect.getBounds(), { ...mapPad(), maxZoom: 11, duration: REDUCED.matches ? 0 : 0.8 });
 }
+/** Select an event everywhere: footprint on the map, pressed row in the events table. */
+function selectEvent(ev) {
+  document.querySelectorAll(".event").forEach((b) => b.setAttribute("aria-pressed", String(ev.id != null && b.dataset.id === String(ev.id))));
+  showEvent(ev);
+  if (NARROW.matches) document.getElementById("map").scrollIntoView({ behavior: REDUCED.matches ? "auto" : "smooth", block: "start" });
+}
+
+// on-map callouts: solid badges at the centroids of the three most persistent events
+const evMonth = (ev) => `${MONTHS[Number(ev.start.slice(5, 7)) - 1]} ${ev.start.slice(0, 4)}`;
+function renderCallouts(evs) {
+  calloutLayer.clearLayers();
+  evs.filter((ev) => ev.lat != null && ev.lon != null && ev.start).slice(0, 3).forEach((ev, i) => {
+    const text = `${evMonth(ev)} · ${fmt(ev.duration_days, 0)} days · ${fmt(ev.area_km2, 0)} km²`;
+    const badge = el("span", { class: `callout callout-${i ? "warning" : "critical"}`, text });
+    const m = L.marker([ev.lat, ev.lon], {
+      icon: L.divIcon({ className: "callout-icon", html: badge.outerHTML, iconSize: [0, 0] }),
+      keyboard: true, zIndexOffset: 1000 - i * 10,
+    }).on("click", () => selectEvent(ev)).addTo(calloutLayer);
+    m.getElement()?.setAttribute("aria-label",
+      `${i ? "Top fire event" : "Most persistent fire event"}, first detected ${ev.start}, detected over ${fmt(ev.duration_days, 0)} days, detection footprint ${fmt(ev.area_km2, 0)} square kilometres. Show on map.`);
+  });
+  staggerCallouts();
+}
+
+/** Lift a callout that would sit on top of an earlier one, so the three labels stay readable at any zoom. */
+function staggerCallouts() {
+  const placed = [];
+  calloutLayer.eachLayer((m) => {
+    const badge = m.getElement()?.querySelector(".callout");
+    if (!badge) return;
+    const p = map.latLngToLayerPoint(m.getLatLng());
+    let lift = 0;
+    while (placed.some((q) => Math.abs(q.x - p.x) < 230 && Math.abs(q.y - (p.y - lift)) < 28)) lift += 30;
+    placed.push({ x: p.x, y: p.y - lift });
+    badge.style.bottom = `${8 + lift}px`;
+    badge.style.setProperty("--lift", `${lift}px`);
+    // on a narrow map, slide the label sideways so it is not cut off by the map edge
+    const cx = map.latLngToContainerPoint(m.getLatLng()).x, half = badge.offsetWidth / 2, w = map.getSize().x;
+    const shift = NARROW.matches && cx > 0 && cx < w ? Math.max(54 + half - cx, Math.min(0, w - 6 - half - cx)) : 0;
+    badge.style.transform = `translateX(calc(-50% + ${Math.round(shift)}px))`;
+    badge.classList.toggle("shifted", shift !== 0);
+    badge.classList.toggle("lifted", lift > 0);
+  });
+}
+map.on("zoomend moveend", staggerCallouts);
+
+// findings rail -------------------------------------------------------------
+// Every card is built from numbers the API returned for this area: nothing is invented here.
+const findingsUi = { dismissed: new Set(), expanded: false };
+const FINDINGS_SHOWN = 3;
+function buildFindings() {
+  const out = [];
+  const d = state.calendar, s = d?.summary, evs = state.events || [];
+  const anoms = (s?.top_anomalies || []).filter((a) => a.anomaly != null).slice(0, 2).map((a) => ({
+    id: `anom-${a.year}-${a.month}`,
+    level: a.anomaly >= 2 ? "critical" : a.anomaly >= 1.5 ? "warning" : "info",
+    text: `${MONTHS_LONG[a.month - 1]} ${a.year} reached ${fmtRatio(a.anomaly)} the ${MONTHS[a.month - 1]} median (${fmt(a.value)} fire cell-days)`,
+    meta: `${a.anomaly >= 2 ? "Major anomaly" : a.anomaly >= 1.5 ? "Anomaly" : "Mild anomaly"} · ${MONTHS[a.month - 1]} ${a.year}`,
+  }));
+  const events = evs.filter((ev) => ev.start).slice(0, 3).map((ev, i) => ({
+    id: `ev-${ev.id ?? ev.start}`,
+    level: i ? "warning" : "critical",
+    text: `${i ? "Top fire event" : "Most persistent fire event"}: detected over ${fmt(ev.duration_days, 0)} days from ${ev.start}, ${fmt(ev.area_km2, 0)} km² detection footprint`,
+    meta: `Fire event · ${evMonth(ev)}${ev.bbox ? " · show on map" : ""}`,
+    action: ev.bbox ? () => selectEvent(ev) : null,
+  }));
+  const info = [];
+  const trend = s?.trend_per_decade_pct;
+  if (trend != null) {
+    const pctTxt = `${trend > 0 ? "+" : ""}${fmt(trend, 1)}% per decade`;
+    info.push({
+      id: "trend", level: "info",
+      text: s.trend_significant === false
+        ? `Trend of ${pctTxt} is not statistically significant${s.trend_t != null ? ` (t = ${s.trend_t.toFixed(1)})` : ""}`
+        : `Fire activity is ${trend >= 0 ? "rising" : "falling"}: ${pctTxt}`,
+      meta: `Trend · ${state.from.slice(0, 4)}–${state.to.slice(0, 4)}`,
+    });
+  }
+  const rest = [];
+  if (s?.peak_year) rest.push({ id: "peak-year", level: "info", text: `Peak year was ${s.peak_year.year}, with ${fmt(s.peak_year.value)} fire cell-days`, meta: "Record · peak year" });
+  if (s?.peak_month) rest.push({ id: "peak-month", level: "info", text: `Peak month was ${MONTHS_LONG[s.peak_month.month - 1]} ${s.peak_month.year}, with ${fmt(s.peak_month.value)} fire cell-days`, meta: "Record · peak month" });
+  if (s?.typical_peak_month) rest.push({ id: "typical", level: "info", text: `${MONTHS_LONG[s.typical_peak_month - 1]} is the typical peak month (highest median)`, meta: "Season" });
+  const h = d?.handoff;
+  if (h?.viirs_per_modis != null) rest.push({
+    id: "handoff", level: "info",
+    text: `VIIRS logged ${fmtX(h.viirs_per_modis)} as many fire cell-days as MODIS here${h.overlap_years ? ` in ${h.overlap_years[0]}–${h.overlap_years[1]}` : ""}; the record is harmonized for that gap`,
+    meta: "Sensor handoff · open calendar",
+    action: () => selectTab("calendar", true),
+  });
+  const outs = Object.entries(state.health?.outages || {}).filter(([, r]) => r?.length);
+  if (d && outs.length) rest.push({
+    id: "outages", level: "info",
+    text: `Satellite outages detected in the archive: ${outs.map(([k, r]) => `${OUTAGE_NAMES[k] || k} ${r.length}`).join(", ")}. Missing days are filled from observed days`,
+    meta: "Data quality · open method",
+    action: () => selectTab("method", true),
+  });
+  // lead with one of each kind, then the remainder
+  out.push(anoms[0], events[0], info[0], anoms[1], ...rest.slice(0, 2), ...events.slice(1), ...rest.slice(2));
+  return out.filter(Boolean);
+}
+function renderFindings(loading = false) {
+  const list = $("#findings-list"), count = $("#findings-count");
+  if (loading) {
+    count.textContent = "…";
+    list.replaceChildren(el("div", { class: "finding finding-info" }, el("span", { class: "finding-ind", "aria-hidden": "true" }),
+      el("div", { class: "finding-main" }, el("div", { class: "state loading", text: "Reading the record…" }))));
+    return;
+  }
+  const all = buildFindings().filter((f) => !findingsUi.dismissed.has(f.id));
+  count.textContent = String(all.length);
+  $("#findings-live").textContent = `${all.length} finding${all.length === 1 ? "" : "s"}`;
+  if (!all.length) {
+    list.replaceChildren(el("div", { class: "rail-empty", text: state.calendar || state.events ? "No findings for this area and date range." : "Findings unavailable." }));
+    return;
+  }
+  const shown = findingsUi.expanded ? all : all.slice(0, FINDINGS_SHOWN);
+  const kids = shown.map((f) => {
+    const inner = [el("span", { class: "finding-text", text: f.text + "." }), el("span", { class: "finding-meta", text: f.meta })];
+    return el("div", { class: `finding finding-${f.level}` },
+      el("span", { class: "finding-ind", "aria-hidden": "true" }),
+      f.action ? el("button", { type: "button", class: "finding-main", onclick: f.action }, inner) : el("div", { class: "finding-main" }, inner),
+      el("button", { type: "button", class: "finding-ack", "aria-label": `Dismiss finding: ${f.text}`, title: "Dismiss", text: "✓",
+        onclick: () => { findingsUi.dismissed.add(f.id); renderFindings(); } }));
+  });
+  const more = all.length - FINDINGS_SHOWN;
+  if (more > 0) kids.push(el("button", { type: "button", class: "show-more", "aria-expanded": String(findingsUi.expanded),
+    text: findingsUi.expanded ? "▲ Show fewer" : `▼ Show ${more} more`,
+    onclick: () => { findingsUi.expanded = !findingsUi.expanded; renderFindings(); } }));
+  list.replaceChildren(...kids);
+}
+
+// drawer + tabs -------------------------------------------------------------
+const drawer = $("#analysis");
+const tabs = [...drawer.querySelectorAll('[role="tab"]')];
+let activeTab = "calendar";
+function syncPanels() {
+  const hasArea = !document.body.classList.contains("no-area");
+  tabs.forEach((t) => {
+    const on = t.id === `tab-${activeTab}`;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+  });
+  $("#cards").hidden = !hasArea;
+  $("#empty").hidden = hasArea || activeTab === "method";
+}
+function setDrawer(size) {
+  drawer.dataset.size = size;
+  document.body.dataset.drawer = size;
+  const closed = size === "closed", full = size === "full";
+  const c = $("#drawer-collapse"), x = $("#drawer-expand");
+  c.setAttribute("aria-expanded", String(!closed));
+  c.setAttribute("aria-label", closed ? "Open analysis panel" : "Collapse analysis panel");
+  c.title = closed ? "Open" : "Collapse";
+  c.textContent = closed ? "▴" : "▾";
+  x.setAttribute("aria-pressed", String(full));
+  x.setAttribute("aria-label", full ? "Restore analysis panel size" : "Expand analysis panel");
+  x.title = full ? "Restore" : "Expand";
+  $("#drawer-body").hidden = closed;
+}
+function selectTab(name, focus = false) {
+  activeTab = name;
+  if (drawer.dataset.size === "closed") setDrawer("half");
+  syncPanels();
+  $("#drawer-body").scrollTop = 0;
+  if (focus) $(`#tab-${name}`).focus();
+}
+tabs.forEach((t, i) => {
+  t.addEventListener("click", () => selectTab(t.id.slice(4)));
+  t.addEventListener("keydown", (e) => {
+    const to = { ArrowRight: (i + 1) % tabs.length, ArrowLeft: (i - 1 + tabs.length) % tabs.length, Home: 0, End: tabs.length - 1 }[e.key];
+    if (to == null) return;
+    e.preventDefault();
+    selectTab(tabs[to].id.slice(4), true);
+  });
+});
+$("#drawer-collapse").addEventListener("click", () => setDrawer(drawer.dataset.size === "closed" ? "half" : "closed"));
+$("#drawer-expand").addEventListener("click", () => setDrawer(drawer.dataset.size === "full" ? "half" : "full"));
+setDrawer("half");
+syncPanels();
 
 // brief -------------------------------------------------------------
 $("#brief-btn").addEventListener("click", async () => {
@@ -843,6 +1075,144 @@ async function loadValidation(bbox) {
   }
 }
 
+// ───────────────────────── landing ─────────────────────────
+// Shown on a plain visit; a URL that already carries an area goes straight to the app.
+const landing = $("#landing"), appRoot = $("#app");
+const HERO_BBOX = [-124.5, 32.5, -114.0, 42.0]; // California: the calendar drawn behind the headline
+const baseUrl = () => { const a = new URLSearchParams(location.search).get("api"); return location.pathname + (a ? `?api=${encodeURIComponent(a)}` : ""); };
+let landingLoaded = false;
+function showLanding(load = true) {
+  landing.hidden = false;
+  appRoot.inert = true;
+  document.title = "Plume · every fire season since 2000, one record";
+  if (load && !landingLoaded) { landingLoaded = true; loadLanding(); }
+}
+function hideLanding() {
+  landing.hidden = true;
+  appRoot.inert = false;
+  document.title = "Plume · burning calendar";
+  map.invalidateSize();
+}
+function openApp() {
+  history.pushState(null, "", location.href); // Back returns to the landing page
+  hideLanding();
+  if (!state.area) {
+    const ca = state.regions.find((r) => r.id === "california");
+    setBbox(ca ? ca.bbox : HERO_BBOX);
+    setFormOpen(false);
+  }
+  if (state.health?.data_ready) analyze(); else drawSelection(state.area);
+  areaToggle.focus({ preventScroll: true });
+}
+$("#lp-open").addEventListener("click", openApp);
+$("#lp-open-2").addEventListener("click", openApp);
+$("#lp-how-link").addEventListener("click", (e) => {
+  e.preventDefault();
+  const t = $("#lp-how");
+  t.scrollIntoView({ behavior: REDUCED.matches ? "auto" : "smooth", block: "start" });
+  t.focus({ preventScroll: true });
+});
+$("#brand-home").addEventListener("click", (e) => {
+  e.preventDefault();
+  history.pushState(null, "", baseUrl());
+  landing.scrollTop = 0;
+  showLanding();
+  $("#lp-open").focus();
+});
+addEventListener("popstate", () => {
+  if (parseAreaQuery(new URLSearchParams(location.search))) hideLanding(); else showLanding();
+});
+
+const ymFrac = (ym) => Number(ym.slice(0, 4)) + (Number(ym.slice(5, 7)) - 1) / 12;
+/** Sensor timeline: start dates come from /health when it answers; the fallbacks are the launch-era facts. */
+function renderTimeline(h) {
+  const t0 = 2000.5, t1 = 2028, pos = (ym) => `${(((ymFrac(ym) - t0) / (t1 - t0)) * 100).toFixed(2)}%`;
+  const SNPP_END = "2026-11"; // Suomi NPP stopped delivering observations on 2 November 2026
+  const rows = [
+    { name: "Terra", sub: "MODIS · 1 km", cls: "modis", from: h?.coverage?.from || "2000-11" },
+    { name: "Aqua", sub: "MODIS · 1 km", cls: "modis", from: h?.aqua_first_month || "2002-07" },
+    { name: "Suomi NPP", sub: "VIIRS · 375 m", cls: "viirs", from: (h?.sensors?.VIIRS?.[0] || "2012-01").slice(0, 7), to: SNPP_END },
+    { name: "NOAA-20", sub: "VIIRS · 375 m", cls: "viirs", from: (h?.sensors?.NOAA20?.[0] || "2018-04").slice(0, 7) },
+  ];
+  const handoff = rows[2].from;
+  $("#lp-tl").replaceChildren(
+    el("div", { class: "lp-tl-rows", role: "list" },
+      rows.map((r) => el("div", { class: "lp-tl-row", role: "listitem" },
+        el("div", { class: "lp-tl-name" }, r.name, el("small", { text: r.sub })),
+        el("div", { class: "lp-tl-track" }, el("div", {
+          class: `lp-tl-bar ${r.cls} ${r.to ? "ends" : "open"}`,
+          style: `left:${pos(r.from)};${r.to ? `width:calc(${pos(r.to)} - ${pos(r.from)})` : "right:0"}`,
+          text: r.to ? `${ymLabel(r.from)} → ends 2 ${ymLabel(r.to)}` : `${ymLabel(r.from)} →`,
+        })))),
+      el("div", { class: "lp-tl-marks", "aria-hidden": "true" },
+        el("i", { class: "lp-tl-mark", style: `left:${pos(handoff)}` }),
+        el("i", { class: "lp-tl-mark crit", style: `left:${pos(SNPP_END)}` }))),
+    el("div", { class: "lp-tl-axis", "aria-hidden": "true" }, [2005, 2010, 2015, 2020, 2025].map((y) => el("span", { style: `left:${pos(`${y}-01`)}`, text: y }))),
+    el("div", { class: "lp-tl-notes" },
+      el("span", { class: "lp-flag warn" }, el("b", { text: `Handoff · ${ymLabel(handoff)}` }), "MODIS-only years are converted to VIIRS units"),
+      el("span", { class: "lp-flag crit" }, el("b", { text: "S-NPP ends · 2 Nov 2026" }), "NOAA-20 carries the record on, scaled to S-NPP units")),
+  );
+}
+
+/** Background: the real California burning calendar, one column per year and one row per month. */
+function renderHeroCalendar(d) {
+  const months = d.months || [];
+  if (!months.length) return;
+  const by = new Map(months.map((m) => [`${m.year}-${m.month}`, m.value]));
+  const years = [...new Set(months.map((m) => m.year))].sort((a, b) => a - b);
+  const max = Math.max(0, ...months.map((m) => m.value ?? 0));
+  const cells = [];
+  years.forEach((y, c) => {
+    for (let m = 1; m <= 12; m++) {
+      const v = by.get(`${y}-${m}`);
+      cells.push(el("i", { style: `${v != null ? `background:${viridis(countT(v, max))};` : ""}animation-delay:${c * 45 + m * 22}ms` }));
+    }
+  });
+  $("#lp-cal").replaceChildren(...cells);
+  $("#lp-calnote").textContent = `Behind: California’s burning calendar, ${years[0]}–${years.at(-1)} · one column per year, one row per month`;
+}
+
+/** Every number on the landing page comes from the API; a figure that is not available is left out. */
+async function loadLanding() {
+  renderTimeline(state.health);
+  const bbox = bboxStr(HERO_BBOX);
+  const stats = [], facts = { 1: null, 2: null, 3: null };
+  const paint = () => {
+    $("#lp-stats").replaceChildren(...stats.filter(Boolean).map(([v, label]) => el("div", { class: "lp-stat" }, el("b", { text: v }), el("span", { text: label }))));
+    for (const [k, f] of Object.entries(facts)) $(`#lp-fact-${k}`).replaceChildren(...(f ? [el("b", { text: f[0] }), f[1]] : []));
+  };
+  const h = state.health;
+  if (h?.data_ready) {
+    const from = h.coverage?.from, to = (h.max_date || h.coverage?.to || "").slice(0, 7);
+    if (validYM(from) && validYM(to)) stats[0] = [`${ymLabel(from)} – ${ymLabel(to)}`, `continuous record${h.synthetic ? " (demo data)" : ""}`];
+    const n = Object.keys(h.sensors || {}).length;
+    if (n) stats[1] = [String(n), "sensor records fused"];
+    paint();
+  }
+  if (!h?.data_ready) return;
+  const from = h.coverage?.from, to = h.coverage?.to;
+  getJSON("/calendar", { bbox, from, to }).then((d) => {
+    renderHeroCalendar(d);
+    if (d.summary?.total != null) stats[2] = [fmt(d.summary.total, 0), "fire cell-days in California"];
+    if (d.months?.length) facts[2] = [fmt(d.months.length, 0), "months in California’s calendar"];
+    if (d.handoff?.viirs_per_modis != null && !facts[1]) facts[1] = [fmtX(d.handoff.viirs_per_modis), "VIIRS per MODIS cell-day, California"];
+    paint();
+  }).catch((e) => console.warn("landing calendar:", e.message));
+  getJSON("/validation", { bbox }).then((v) => {
+    if (v.annual_abs_error_pct != null) {
+      stats[3] = [`${fmt(v.annual_abs_error_pct, 1)}%`, "annual error on held-out years"];
+      facts[1] = [`${fmt(v.annual_abs_error_pct, 1)}%`, `annual error, held-out years${v.region_name ? ` (${v.region_name})` : ""}`];
+      paint();
+    }
+  }).catch((e) => console.warn("landing validation:", e.message));
+  getJSON("/current", { bbox }).then((c) => {
+    if (c?.ratio != null && c.median > 0) {
+      facts[3] = [`${fmtRatio(c.ratio)} normal`, `California, ${MONTHS[c.month - 1]} ${c.year}${c.partial ? " so far" : ""}`];
+      paint();
+    }
+  }).catch((e) => console.warn("landing current:", e.message));
+}
+
 // ───────────────────────── boot ─────────────────────────
 function showBanner(html, err = false) {
   const b = $("#banner");
@@ -879,7 +1249,7 @@ async function loadRegions() {
     if (!regions.length) return host.replaceChildren(el("span", { class: "small muted", text: "No presets." }));
     host.replaceChildren(...regions.map((r) => el("button", {
       type: "button", class: "chip", "aria-pressed": "false", "data-bbox": bboxStr(r.bbox), text: r.name,
-      onclick: () => { setBbox(r.bbox); showFormError(""); analyze(); },
+      onclick: () => { setBbox(r.bbox); showFormError(""); setFormOpen(false); analyze(); },
     })));
     if (state.area) setArea(state.area); // refresh pressed state
   } catch (e) {
@@ -892,12 +1262,17 @@ async function boot() {
   const urlArea = parseAreaQuery(q);
   const urlFrom = validYM(q.get("from")) ? q.get("from") : null;
   const urlTo = validYM(q.get("to")) ? q.get("to") : null;
+  const urlRegion = urlArea ? null : q.get("region"); // ?region=<id> selects a quick-pick region
+  const direct = !!(urlArea || urlRegion);
+  setFormOpen(!direct && !NARROW.matches);
+  if (direct) hideLanding(); else showLanding(false);
 
   let health;
   try {
     health = await getJSON("/health");
   } catch (e) {
-    $("#coverage").innerHTML = `<span class="dot bad"></span>API offline`;
+    $("#coverage").innerHTML = $("#lp-coverage").innerHTML = `<span class="dot bad"></span>API offline`;
+    if (!direct) showLanding();
     showBanner(`Can't reach the Plume API at <code>${API.replace(/</g, "&lt;")}</code>. Start it with <code>uvicorn index:app --port 8000</code>, or pass <code>?api=URL</code>.`, true);
     if (urlArea) { setArea(urlArea); drawSelection(state.area); }
     fields.from.value = urlFrom || "2000-11"; fields.to.value = urlTo || nowYM();
@@ -916,6 +1291,7 @@ async function boot() {
   $("#coverage").innerHTML = health.data_ready
     ? `<span class="dot ok"></span>Data ${recordSpan}${health.synthetic ? " · demo" : ""}`
     : `<span class="dot bad"></span>No data built`;
+  $("#lp-coverage").innerHTML = $("#coverage").innerHTML;
 
   if (health.method === "ratio") {
     const p = document.querySelector("#how-ratio");
@@ -927,7 +1303,13 @@ async function boot() {
     showBanner(`<strong>Demo data:</strong> synthetic FIRMS-format hotspots. Run the pipeline on real FIRMS archives to replace.`);
   }
 
-  loadRegions();
+  renderAreaCard();
+  if (!direct) showLanding();
+  const regionsP = loadRegions();
+  if (urlRegion) regionsP.then(() => {
+    const r = state.regions.find((x) => x.id === urlRegion);
+    if (r && !state.area) { setBbox(r.bbox); if (health.data_ready) analyze(); else drawSelection(state.area); }
+  });
   if (!urlArea) loadValidation();
   if (urlArea) {
     setArea(urlArea);
