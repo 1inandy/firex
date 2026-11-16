@@ -1,6 +1,6 @@
 # Plume API contract
 
-Base URL: `http://localhost:8000` (frontend reads `?api=` override). Endpoints are GET, JSON unless noted (alerts also use POST/DELETE).
+Base URL: `/api` on the deployed site (`uvicorn index:app` locally), or `http://localhost:8000` when running `backend.app.main:app` alone; the frontend reads an `?api=` override. All endpoints are GET, JSON unless noted.
 
 **Area params.** Every endpoint that takes an area accepts exactly one of:
 - `bbox=W,S,E,N` (degrees)
@@ -8,7 +8,7 @@ Base URL: `http://localhost:8000` (frontend reads `?api=` override). Endpoints a
 - `circle=lon,lat,radius_km` (radius 0–2000 km)
 
 If several are given, `poly` wins, then `circle`. Shapes filter by grid-cell centre (calendar, cells, current), hotspot position (`/csv`) and event centroid (events, precedent). Regional conversion ratios and validation use the region containing the shape's bounding-box centre. Below, `bbox` stands for any of the three. Month params are `YYYY-MM`; day params are `YYYY-MM-DD`.
-Errors: `{"detail": "..."}` with 400 (bad params) or 503 (no data built yet).
+Errors: `{"detail": "..."}` with 400 (bad params), 413 (CSV request too large) or 503 (no data built yet).
 
 ## `/health`
 ```json
@@ -16,7 +16,9 @@ Errors: `{"detail": "..."}` with 400 (bad params) or 503 (no data built yet).
  "coverage": {"from": "2001-01", "to": "2026-11"}}
 ```
 `synthetic: true` means the data came from `pipeline.demo` (not real FIRMS). The UI must show a banner.
-Also returns `method` (harmonization in use), `overlap_start_year` (2012) and `modis_drift_from` (`{"Terra": 2020, "Aqua": 2022}`).
+Also returns `method` (harmonization in use), `overlap_start_year` (2012), `modis_drift_from` (`{"Terra": 2020, "Aqua": 2022}`),
+`aqua_first_month` (`"2002-07"`; earlier MODIS is Terra only), `snpp_end` (last full month of S-NPP coverage; later months
+come from NOAA-20), `sensors` (per family `[first, last]` day covered by the input files) and `live_nrt` (the server has a FIRMS key).
 
 ## `/regions`
 Preset quick-pick areas.
@@ -40,40 +42,43 @@ Harmonized month × year series (VIIRS-equivalent fire cell-days).
    "top_anomalies": [{"year": 2020, "month": 9, "value": 900.0, "anomaly": 5.1}]
  }}
 ```
-- `source`: `"viirs"` (2012→, measured) or `"modis_converted"` (2001–2011, MODIS × monthly ratio). `lo/hi` = 10–90% ratio band (equal to value for VIIRS).
-- `anomaly` = value ÷ median for that calendar month (null if median is 0). Medians use complete months only.
+- `source`: `"modis_converted"` (2000–2011, MODIS converted; Terra-only months before 2002-07 also scaled to Terra + Aqua), `"viirs"` (S-NPP, measured, 2012 → `snpp_end`) or `"noaa20_converted"` (NOAA-20 in S-NPP units, after `snpp_end`). `lo/hi` = 10–90% band from leave-one-year-out errors (equal to value for measured S-NPP).
+- `anomaly` = value ÷ median for that calendar month (null if median is 0, and for the partial month). The median uses every complete month of the whole record, whatever `from`/`to` is displayed.
 - `partial: true` marks the month still in progress (its value covers only the days observed so far).
 - `trend_per_decade_pct` may be null (too few years).
-- `raw` / `raw_source` (`"modis"`|`"viirs"`): the un-harmonized stitched record (raw MODIS before 2012, raw VIIRS after), for the "raw sensors" view.
-- `handoff`: `{"before_years": [2009, 2011], "after_years": [2012, 2014], "raw_jump": 2.3, "harmonized_jump": 1.1}`: mean annual total after ÷ before the sensor switch, raw vs. harmonized. Null when there aren't three complete years on both sides.
+- `raw` / `raw_source` (`"modis"`|`"viirs"`|`"noaa20"`): the un-harmonized stitched record, for the "raw sensors" view.
+- `handoff`: `{"overlap_years": [2012, 2019], "viirs_per_modis": 1.95, "before_years": [2009, 2011], "after_years": [2012, 2014], "raw_jump": 2.51, "harmonized_jump": 1.17}`. `viirs_per_modis` = VIIRS ÷ MODIS fire cell-days in this area over the same months (the sensor difference, measured simultaneously). The jumps compare three complete years either side of 2012 (context only: they include real change). Null without overlap data.
 - `area_kind` (`"bbox"|"polygon"|"circle"`) and `area_km2`.
 
 ## `/current?bbox`
-Latest month vs. history for the same calendar month.
+This month so far vs. the same days of the same month in every past year. Anchored to today: the month containing
+yesterday. Days after the archive ends come from FIRMS `VIIRS_NOAA20_NRT` (5-day calls from the 1st; static heat
+sources masked); `days_covered` is the last day actually fetched.
 ```json
 {"year": 2026, "month": 11, "value": 340.0, "median": 120.0, "ratio": 2.83,
  "highest_since": 2020, "rank": 3, "n_years": 26, "partial": true, "days_covered": 15,
- "source": "archive"}
+ "live": true, "source": "nrt", "note": null}
 ```
+- Without a server `FIRMS_MAP_KEY` (or if FIRMS is unreachable): `live: false`, `source: "archive"`, the latest complete archived month, and `note` saying so.
 - `highest_since`: most recent earlier year whose same month was higher; null if this is the record. Only meaningful when `ratio > 1`.
 - When the month is partial, `value` and `median` both cover days 1–`days_covered` only (same days of past years), so the comparison is fair.
 - `rank`: 1 = highest of `n_years` for that calendar month. `partial` = month not finished.
-- `source`: `"nrt"` (live FIRMS) or `"archive"`.
 
 ## `/calendar.csv?bbox&from&to`
 CSV download: `year,month,value,lo,hi,source,anomaly,median_for_month,partial,raw,raw_source`.
 
 ## `/csv?bbox&from=YYYY-MM-DD&to=YYYY-MM-DD`
-CSV download of cleaned hotspots: `latitude,longitude,acq_date,acq_time,sensor,satellite,confidence,frp,daynight,type`.
+CSV download of cleaned hotspots, as detected (all sensors, not harmonized), streamed: `latitude,longitude,acq_date,acq_time,sensor,satellite,confidence,frp,daynight,type`. Filters on exact detection position. More than 1,000,000 rows → 413.
 
 ## `/cells?bbox&from=YYYY-MM&to=YYYY-MM&limit=5000`
-Grid cells with fire activity in the range (for a map heat layer), largest first.
+Grid cells with fire activity in the range (for a map heat layer), largest first, in the calendar's harmonized units.
 ```json
-{"deg": 0.05, "cells": [{"lat": 37.025, "lon": -119.975, "cell_days": 14}]}
+{"deg": 0.05, "cells": [{"lat": 37.025, "lon": -119.975, "cell_days": 14.6}]}
 ```
 
 ## `/events?bbox&from=YYYY-MM-DD&to=YYYY-MM-DD&limit=50`
-Hotspots clustered into fire events (adjacent grid cells within a few days of each other), biggest first.
+Detections clustered into fire events (adjacent grid cells within a few days of each other), most fire cell-days first.
+`area_km2` is the detection footprint (area of grid cells with detections), not burned area; `duration_days` is the detection span.
 ```json
 {"events": [{"id": "e123", "start": "2020-08-16", "end": "2020-10-02", "duration_days": 48,
              "cell_days": 900, "area_km2": 1500.0, "peak_frp": 812.3,
@@ -89,33 +94,29 @@ How fires starting in that calendar month behaved historically in the area.
 `largest` may be null when `n_events` is 0.
 
 ## `/brief?bbox`
-Grounded plain-language briefing. Every number in `text` is checked against `facts`.
+Plain-language briefing written by a deterministic template from the computed `facts` (no model; every number is a fact).
 ```json
-{"text": "…", "facts": {"current_value": 340.0, "...": 0}, "verified": true,
- "unverified_numbers": [], "model": "template"}
+{"text": "…", "facts": {"current_value": 340.0, "...": 0}}
 ```
-`model` is `"template"` unless `ANTHROPIC_API_KEY` is set.
 
 ## `/validation?bbox` (bbox optional: picks the region containing its centre)
-Region-wide out-of-sample check of the harmonization: ratios fit on 2012–2020, applied to MODIS 2021→, compared to real VIIRS.
+Out-of-sample checks of the conversion actually used (fit on 2012–2019, before the MODIS orbit drift).
 ```json
-{"region": "california", "region_name": "California", "method": "frp_strata",
- "train_years": [2012, 2020], "test_years": [2021, 2026],
- "monthly": [{"year": 2021, "month": 1, "predicted": 100.0, "observed": 110.0, "modis_raw": 30.0}],
- "annual": [{"year": 2021, "predicted": 1200.0, "observed": 1300.0, "error_pct": -7.7}],
- "mape_monthly_pct": 18.2, "annual_abs_error_pct": 6.1, "r2": 0.91,
- "baseline": {"method": "ratio", "mape_monthly_pct": 25.9, "annual_abs_error_pct": 25.6, "r2": 0.83},
+{"region": "california", "region_name": "California", "method": "frp_strata", "scheme": "leave-one-year-out",
+ "train_years": [2012, 2019], "test_years": [2012, 2019],
+ "monthly": [{"year": 2012, "month": 1, "predicted": 100.0, "observed": 110.0, "modis_raw": 30.0}],
+ "annual": [{"year": 2012, "predicted": 5923.9, "observed": 5451.0, "error_pct": 8.7, "modis_drift": []}],
+ "mape_monthly_pct": 17.1, "annual_abs_error_pct": 6.6, "r2": 0.934,
+ "baseline": {"method": "ratio", "mape_monthly_pct": 17.6, "annual_abs_error_pct": 8.1, "r2": 0.875},
  "methods": [{"method": "ratio", "...": 0}, {"method": "frp_strata", "...": 0}, {"method": "quantile", "...": 0}],
- "drift_from": {"Terra": 2020, "Aqua": 2022}}
+ "spatial": {"description": "…", "method": "frp_strata", "annual_abs_error_pct": 7.4, "...": 0, "methods": []},
+ "drift_test": {"years": [2020, 2025], "annual": [], "annual_abs_error_pct": 7.4, "mean_bias_pct": -6.5},
+ "band": [0.827, 1.282], "band_coverage_pct": 73.6, "band_coverage_on": "drift-test years (not used to set the band)",
+ "noaa20_bridge": {"years": [2019, 2025], "annual": [], "annual_abs_error_pct": 2.3},
+ "terra_scale": {"1": 2.36, "...": 0}, "drift_from": {"Terra": 2020, "Aqua": 2022}}
 ```
-- `methods`: every harmonization method fit on the same training years and scored on the same test years (`quantile` only when per-cell data exists).
-- `annual[].modis_drift`: MODIS satellites whose overpass had drifted by that year (e.g. `["Terra", "Aqua"]`).
-
-## Alerts
-Subscriptions stored in `data/alerts.json`. An alert triggers when the latest month (same days-so-far comparison as `/current`) is ≥ `threshold` × the historical median and has at least 5 fire cell-days (or has fire where the median is 0). It notifies at most once per calendar month.
-
-- `GET /alerts` → `{"alerts": [{"id", "name", "area": {"circle": "-120.0,37.0,150.0"}, "threshold": 2.0, "email": "o…@example.com", "webhook": false, "created", "last_notified": "2026-11", "status": {"triggered": true, "year": 2026, "month": 11, "value": 48.0, "median": 30.8, "ratio": 1.56, "partial": true, "source": "archive"}}], "min_cell_days": 5}` (contact details masked)
-- `POST /alerts` with JSON `{"bbox"|"poly"|"circle": "...", "threshold": 2.0, "name": "optional", "email": "optional", "webhook": "https://optional"}` → 201 + the alert with `status`. 400 on a bad area, email, non-https webhook or threshold outside (1, 20].
-- `DELETE /alerts/{id}` → 204, or 404.
-- `POST /alerts/check` → `{"results": [{"alert": {...}, "status": {...}, "notified": ["emailed" | "webhook sent" | "logged (SMTP_HOST not set)" | "email failed: …"]}]}`. Same as `python -m backend.app.alerts` (for cron).
-Email uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ALERT_FROM` from `.env`; webhooks get a JSON POST `{"text": "...", "status": {...}}`.
+- `annual`/`monthly`/`methods`: each year 2012–2019 predicted by a conversion fit on the other years.
+- `spatial`: fit on half the grid cells (checkerboard), scored on the other half.
+- `drift_test`: the deployed conversion applied to 2020→ (drifted MODIS); `mean_bias_pct` < 0 = MODIS sees fewer fires.
+- `band`: the 10–90% multiplicative band shipped with converted months; `band_coverage_pct` = share of drift-test months inside it.
+- `noaa20_bridge`: leave-one-year-out error of the NOAA-20 → S-NPP factor. `terra_scale`: Terra + Aqua ÷ Terra per month.

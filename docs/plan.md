@@ -1,6 +1,6 @@
 # Plume: Harmonized Burning Calendar
 *NASA Space Apps 2026: "Harmonization of MODIS and VIIRS Hot Spots" (Advanced/Intermediate)*
-*Inspired by ContainOS (TreeHacks 2026 winner, OpenAI AI track 1st place)*
+*Original planning document. What was built, and the measured results, are in the [README](../README.md).*
 
 ## The idea in one line
 ContainOS showed what responders need in the first hours of a fire. We give them the **memory**: 25 years of satellite fire history merged into one consistent record, so every area (and every new fire) comes with its past.
@@ -22,7 +22,7 @@ Audience: early-warning and emergency responders, scientists, land managers, fir
 
 ## Why now (pitch ammo)
 - MODIS has run on Terra (since 2000) and Aqua (since 2002), but both satellites are being retired. NASA projects science end of about Feb 2027 for Terra and Sep 2027 for Aqua, and Terra has been drifting in orbit since 2020.
-- VIIRS (on Suomi NPP since 2012, NOAA-20, NOAA-21) is the successor, but it's sharper and detects many more small fires.
+- VIIRS (Suomi NPP 2012 → 2 Nov 2026, NOAA-20 2018→, NOAA-21 2023→) is the successor, but it's sharper and detects many more small fires. S-NPP stopped delivering data on 2 Nov 2026 ([NASA](https://www.earthdata.nasa.gov/data/alerts-outages/reminder-new-suomi-npp-observations-cease-november-2-2026)), so the record now also needs a NOAA-20 → S-NPP bridge.
 - Without harmonization, a fire record plotted across both sensors shows a fake "explosion" in fires after 2012. Fire managers either lose 12 years of history or get misled. **Your tool fixes that.**
 
 ## The data
@@ -33,19 +33,19 @@ Audience: early-warning and emergency responders, scientists, land managers, fir
 
 **Getting it:**
 - **Free MAP_KEY** from the FIRMS API page. Get it before the event.
-- **The area API** (`/api/area/csv/{MAP_KEY}/{SOURCE}/{bbox}/{days}/{date}`) is good for recent data and live views. Only a few days per request, and a limit of roughly 5,000 transactions per 10 min, so it is **not** the way to pull 25 years.
+- **The area API** (`/api/area/csv/{MAP_KEY}/{SOURCE}/{W,S,E,N}/{DAY_RANGE}/{DATE}`) is good for recent data and live views. DAY_RANGE is 1–5 per call, the optional DATE allows historical queries, and the limit is 5,000 transactions per 10 min, so it is **not** the way to pull 25 years.
 - **Bulk history:** use the FIRMS **archive download** (request by region and date range; files are emailed) or the pre-made **yearly country CSVs**. Pull these **before the hackathon** for your demo region(s); they can take hours to arrive.
-- Check the exact source names (e.g. `MODIS_SP`, `VIIRS_SNPP_SP`, `VIIRS_NOAA20_NRT`) on the FIRMS API page. Some of these I haven't confirmed.
+- Source names (confirmed on the API page): `MODIS_NRT`, `MODIS_SP`, `VIIRS_SNPP_NRT`, `VIIRS_SNPP_SP`, `VIIRS_NOAA20_NRT`, `VIIRS_NOAA20_SP`, `VIIRS_NOAA21_NRT`, `VIIRS_NOAA21_SP`, `LANDSAT_NRT`. NRT data has no `type` column.
 
 ## The core science: how to harmonize (this is what judges will dig into)
 
 **Step 1: Clean**
 - Keep only vegetation and land fires (archive `type == 0`). Drop gas flares, volcanoes, factories and offshore platforms, which otherwise show up as "fires" every single day.
-- Apply confidence thresholds (MODIS ≥ ~30–50; VIIRS "nominal" + "high"). Report your choice.
+- Apply confidence thresholds (MODIS ≥ 30, the user guide's nominal + high; VIIRS "nominal" + "high"). Report your choice.
 - **Remove duplicate detections**: neighboring satellite scans overlap at the swath edges (the "bow-tie" effect), so the same fire can be counted twice.
 
 **Step 2: Count the same thing**
-- Don't compare raw pixel counts, because one MODIS 1 km pixel ≈ 7 VIIRS 375 m pixels.
+- Don't compare raw pixel counts: VIIRS's 375 m pixels detect several times as many fire pixels as MODIS's 1 km ones (e.g. 4.8× in cropland, Vadrevu & Lasko 2018, doi:10.3390/rs10070978).
 - Snap every detection to a **common grid** (e.g. 1 km or 0.05°) and count **"fire cell-days"**: unique grid cells with ≥1 detection on a given day. This removes most of the pixel-size effect right away.
 
 **Step 3: Learn the conversion from the overlap years**
@@ -58,10 +58,10 @@ Audience: early-warning and emergency responders, scientists, land managers, fir
 
 **Step 4: Build the series**
 - 2000–2011: MODIS converted to "VIIRS-equivalent" units, with an uncertainty band.
-- 2012→now: VIIRS (or a blend in the overlap).
+- 2012→now: VIIRS S-NPP, then NOAA-20 converted to S-NPP units after S-NPP's end.
 - Flag known issues: Terra/Aqua orbit drift changes their overpass time, and fires burn hotter in the afternoon, so late-mission MODIS sees a different part of the daily fire cycle.
 
-Further reading: Li et al. 2018 (JGR) compares MODIS vs. VIIRS fire intensity during the overlap; the FIRMS blog explains how sensor resolution changes daily fire extent; and a 2026 *Remote Sensing* paper describes a MODIS-VIIRS fusion method.
+Further reading: Li et al. 2018 (JGR) compares MODIS vs. VIIRS fire intensity during the overlap; the FIRMS blog explains how sensor resolution changes daily fire extent; and Zheng et al. 2026 (*Remote Sensing* 18(10):1650, doi:10.3390/rs18101650) fuse Aqua MODIS and S-NPP VIIRS FRP for 2012–2024 (FRP fusion, not a count record back to 2000).
 
 ## The web app
 
@@ -134,14 +134,14 @@ The pipeline should still work anywhere. Precompute only the demo regions.
 - [ ] Get a FIRMS MAP_KEY
 - [ ] Request archive downloads (MODIS SP + VIIRS SNPP SP, plus NOAA-20) for the demo regions
 - [ ] Read the FIRMS FAQ on confidence, `type` and duplicates
-- [ ] Skim Li et al. 2018 and the 2026 *Remote Sensing* fusion paper
+- [ ] Skim Li et al. 2018 and Zheng et al. 2026
 - [ ] Try to get 15 minutes with a firefighter, land manager or emergency manager to learn what they'd actually check
 - [ ] Look at ContainOS's GitHub repo for its UI and alert ideas (credit it, don't copy)
 
 ## Key links
 - Challenge: https://www.spaceappschallenge.org/2026/challenges/modis-and-viirs-hot-spots/
 - FIRMS API: https://firms.modaps.eosdis.nasa.gov/api
-- FIRMS area API: https://firms.modaps.eosdis.nasa.gov/api/area/csv
+- FIRMS area API: https://firms.modaps.eosdis.nasa.gov/api/area/
 - FIRMS blog on sensor differences: https://wiki.earthdata.nasa.gov/spaces/FIRMS/blog/2022/09/29/266967967/Characteristics+of+VIIRS+MODIS+and+OLI+Sensors+and+Their+Effects+on+the+Spatial+Extent+of+Daily+Active+Fire+Data
 - MODIS → VIIRS transition (NASA): https://www.earthdata.nasa.gov/data/alerts-outages/transition-from-modis-viirs
 - Terra end of an era: https://science.nasa.gov/science-research/earth-science/terra-the-end-of-an-era
