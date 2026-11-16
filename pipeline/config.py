@@ -59,11 +59,6 @@ TERRA_SCALE_YEARS = (2003, 2019)
 # are flagged in the validation (they are also the held-out test years).
 MODIS_DRIFT_FROM = {"Terra": 2020, "Aqua": 2022}
 
-# Alerts: notify when an area's latest month reaches this multiple of its historical median.
-ALERTS_FILE = DATA / "alerts.json"
-ALERT_DEFAULT_THRESHOLD = 2.0
-ALERT_MIN_CELL_DAYS = 5  # ignore "3× normal" when that means 3 cell-days instead of 1
-
 # Which VIIRS satellites make up the "VIIRS" family for the harmonized series. Using only SNPP keeps
 # the record stationary: adding NOAA-20 (2018) and NOAA-21 (2024) would raise counts because more
 # overpasses see more short-lived fires, not because more burned.
