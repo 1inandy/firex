@@ -77,7 +77,9 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     mask &= ~typed | df["type"].isin(config.KEEP_TYPES)
     out = df[mask]
     # Exact duplicates (same sensor, place, time) come from overlapping files.
-    out = out.drop_duplicates(subset=["sensor", "satellite", "latitude", "longitude", "acq_date", "acq_time"])
+    out = (out.sort_values("frp", ascending=False, kind="stable")  # keep the brighter of exact duplicates
+              .drop_duplicates(subset=["sensor", "satellite", "latitude", "longitude", "acq_date", "acq_time"])
+              .sort_index())
     out = out[~swath_duplicates(out)]
     return out.reset_index(drop=True)
 

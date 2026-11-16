@@ -45,7 +45,7 @@ def coverage(raw: Path, hotspots: pd.DataFrame) -> dict[str, list[str]]:
     dates = pd.Series(pd.to_datetime(hotspots["acq_date"]).to_numpy()).groupby(family(hotspots["sensor"]))
     starts, last = dates.min(), dates.max()
     # Files without a parseable coverage (e.g. synthetic demo data): fall back to the detections.
-    return {f: [str(starts[f].date()), ends.get(f, str(last[f].date()))] for f in starts.index}
+    return {f: [str(starts[f].date()), max(ends.get(f, ""), str(last[f].date()))] for f in starts.index}
 
 
 OBS_GROUPS = {  # sensor group -> how to pick its detections
