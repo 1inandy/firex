@@ -519,3 +519,25 @@ def validate(monthly: pd.DataFrame, last_full: tuple[int, int] | None = None, me
         "terra_scale": {int(r.month): round(float(r.terra_scale), 3) for r in full.itertuples()},
         "drift_from": dict(config.MODIS_DRIFT_FROM),
     }
+
+
+def harmonize_cells(monthly: pd.DataFrame, ratios: pd.DataFrame, snpp_end: tuple[int, int] | None = None) -> pd.DataFrame:
+    """Per (cell, year, month) VIIRS-equivalent values, using the same sensor choice and conversion as
+    `harmonize` (the FRP-stratified fit; quantile mapping only makes sense for area totals). For map layers."""
+    cols = ["cell_id", "lat", "lon", "year", "month", "value"]
+    after = _after(monthly.year, monthly.month, snpp_end)
+    early = monthly[(monthly.family == "MODIS") & (monthly.year < config.OVERLAP_START_YEAR)]
+    method = "ratio" if config.HARMONIZE_METHOD == "ratio" else "frp_strata"
+    modis = convert_modis(early, ratios[[c for c in RATIO_COLS if c in ratios]], method)
+    if "terra_scale" in modis:
+        modis = modis.assign(value=modis.value * np.where(_terra_only(modis.year, modis.month),
+                                                          modis.terra_scale.fillna(1.0), 1.0))
+    viirs = monthly[(monthly.family == "VIIRS") & (monthly.year >= config.OVERLAP_START_YEAR) & ~after]
+    viirs = viirs.assign(value=viirs.fire_cell_days.astype(float))
+    n20 = monthly[(monthly.family == "NOAA20") & after]
+    if len(n20) and "n20_scale" in ratios:
+        n20 = n20.merge(ratios[["month", "n20_scale"]], on="month", how="left")
+        n20 = n20.assign(value=n20.fire_cell_days * n20.n20_scale)
+    else:
+        n20 = n20.assign(value=pd.Series(dtype=float))
+    return pd.concat([modis[cols], viirs[cols], n20[cols]], ignore_index=True)

@@ -80,3 +80,30 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     out = out.drop_duplicates(subset=["sensor", "satellite", "latitude", "longitude", "acq_date", "acq_time"])
     out = out[~swath_duplicates(out)]
     return out.reset_index(drop=True)
+
+
+STATIC_KEY_DEG = 0.01  # ~1 km: the size of a MODIS pixel
+
+
+def static_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """Grid keys of archive detections typed as volcano, static land source or offshore (types 1–3)."""
+    s = df[pd.to_numeric(df["type"], errors="coerce").isin([1, 2, 3])]
+    return pd.DataFrame({"ki": np.round(s.latitude / STATIC_KEY_DEG).astype(np.int64),
+                         "kj": np.round(s.longitude / STATIC_KEY_DEG).astype(np.int64)}).drop_duplicates()
+
+
+def mask_static(df: pd.DataFrame, keys: pd.DataFrame) -> pd.DataFrame:
+    """Drop untyped (near-real-time) detections within ~1 km of a known static source.
+
+    NRT data has no `type`, so gas flares and industrial heat would count as fires; the archive's typed
+    detections tell us where those sources are.
+    """
+    if df.empty or keys.empty:
+        return df
+    untyped = df["type"].isna().to_numpy()
+    ki = np.round(df.latitude.to_numpy(float) / STATIC_KEY_DEG).astype(np.int64)
+    kj = np.round(df.longitude.to_numpy(float) / STATIC_KEY_DEG).astype(np.int64)
+    known = set(zip(keys.ki.to_numpy(), keys.kj.to_numpy()))
+    near = np.array([any((i + di, j + dj) in known for di in (-1, 0, 1) for dj in (-1, 0, 1))
+                     for i, j in zip(ki, kj)], dtype=bool)
+    return df[~(untyped & near)]

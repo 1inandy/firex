@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import config
-from .clean import clean
+from .clean import clean, mask_static, static_keys
 from .events import build_events
 from .firms import load_archive
 from .grid import family, monthly_cell_days, to_grid
@@ -38,9 +38,10 @@ def coverage(raw: Path, hotspots: pd.DataFrame) -> dict[str, list[str]]:
             continue
         if fam:
             ends[fam] = max(ends.get(fam, end), end)
-    fam = family(hotspots["sensor"])
-    starts = pd.Series(pd.to_datetime(hotspots["acq_date"]).to_numpy()).groupby(fam).min()
-    return {f: [str(starts[f].date()), ends[f]] for f in ends if f in starts.index}
+    dates = pd.Series(pd.to_datetime(hotspots["acq_date"]).to_numpy()).groupby(family(hotspots["sensor"]))
+    starts, last = dates.min(), dates.max()
+    # Files without a parseable coverage (e.g. synthetic demo data): fall back to the detections.
+    return {f: [str(starts[f].date()), ends.get(f, str(last[f].date()))] for f in starts.index}
 
 
 def _last_full_month(day: str) -> tuple[int, int]:
@@ -59,7 +60,9 @@ def main(raw_dir: str) -> None:
     config.GRID.mkdir(parents=True, exist_ok=True)
     config.HARMONIZED.mkdir(parents=True, exist_ok=True)
     loaded = load_archive(raw)
-    hotspots = clean(loaded)
+    static = static_keys(loaded)  # where the archive says gas flares / industry / volcanoes are
+    static.to_parquet(config.GRID / "static_sources.parquet", index=False)
+    hotspots = mask_static(clean(loaded), static)
     print(f"cleaned {len(loaded):,} -> {len(hotspots):,} hotspots ({time.time() - t0:.0f}s)")
     hotspots.to_parquet(config.GRID / "hotspots.parquet", index=False)
     grid = to_grid(hotspots)
@@ -74,7 +77,7 @@ def main(raw_dir: str) -> None:
     print(f"{len(events):,} fire events ({time.time() - t0:.0f}s)")
 
     min_date = pd.to_datetime(hotspots["acq_date"]).min()
-    cov = coverage(raw, hotspots) if not markers else {}
+    cov = coverage(raw, hotspots)
     record_end = max([c[1] for f, c in cov.items() if f in ("VIIRS", "NOAA20")],
                      default=str(pd.to_datetime(hotspots["acq_date"]).max().date()))
     last_full = _last_full_month(record_end)
