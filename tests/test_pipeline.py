@@ -159,3 +159,18 @@ def test_events_link_adjacent_cells_across_days():
     assert sorted(ev.cell_days.tolist()) == [3, 3, 5]
     a = ev[ev.cell_days == 5].iloc[0]
     assert a.duration_days == 5 and a.start == d0
+
+
+def test_fetch_clip_keeps_only_region_and_reads_archive_schema(tmp_path):
+    from pipeline.fetch import COLUMNS, clip
+    from pipeline.firms import load_archive
+    df = pd.DataFrame({"latitude": [-30.0, -40.0, -23.0], "longitude": [-60.0, -60.0, -70.0],
+                       "acq_date": ["2020-01-01"] * 3, "acq_time": ["0425", "0005", "1330"],
+                       "satellite": ["N", "Terra", "Aqua"], "instrument": ["VIIRS", "MODIS", "MODIS"],
+                       "confidence": ["n", "64", "80"], "frp": [1.0, 2.0, 3.0], "daynight": ["N", "N", "D"],
+                       "type": [0, 0, 2]})[COLUMNS]
+    kept = clip(df, config.REGIONS["chaco"]["bbox"])
+    assert kept.latitude.tolist() == [-30.0]
+    kept.to_csv(tmp_path / "viirs-snpp_2020.csv.gz", index=False)
+    loaded = load_archive(tmp_path)
+    assert loaded.sensor.tolist() == ["VIIRS_SNPP"] and loaded.confidence.tolist() == ["n"]

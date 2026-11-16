@@ -69,6 +69,12 @@ EVENT_MIN_CELL_DAYS = 3
 # Regions with their own VIIRS/MODIS ratios (fit on all cells inside the bbox). A user-drawn area uses
 # the region containing its centre, falling back to ratios fit on all data ("global").
 REGIONS = {
-    "california": {"name": "California", "bbox": (-124.5, 32.5, -114.0, 42.0)},
-    "chaco": {"name": "Gran Chaco & Paraná Delta (AR)", "bbox": (-66.0, -34.0, -57.0, -22.0)},
+    "california": {"name": "California", "bbox": (-124.5, 32.5, -114.0, 42.0), "country": "United_States"},
+    "chaco": {"name": "Gran Chaco & Paraná Delta (AR)", "bbox": (-66.0, -34.0, -57.0, -22.0),
+              "country": "Argentina"},
 }
+
+# FIRMS yearly country files (standard-processing archive, includes `type`; no MAP_KEY needed).
+# https://firms.modaps.eosdis.nasa.gov/country/
+FIRMS_COUNTRY_URL = "https://firms.modaps.eosdis.nasa.gov/data/country/{product}/{year}/{product}_{year}_{country}.csv"
+FIRMS_COUNTRY_PRODUCTS = {"modis": 2000, "viirs-snpp": 2012}  # product -> first year in the archive
