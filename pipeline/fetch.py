@@ -51,7 +51,9 @@ def fetch_region(rid: str, last_year: int) -> None:
             if df is None:
                 print(f"{rid} {product} {year}: not published")
                 continue
-            df.to_csv(path, index=False)
+            tmp = path.with_name(path.name + ".part")
+            df.to_csv(tmp, index=False, compression="gzip")
+            tmp.replace(path)  # atomic: an interrupted download never leaves a truncated file behind
             print(f"{rid} {product} {year}: {len(df):,} hotspots", flush=True)
 
 
