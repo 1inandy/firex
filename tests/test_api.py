@@ -21,7 +21,6 @@ def _paths(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "HARMONIZED", tmp_path / "h")
     monkeypatch.setattr(config, "META", tmp_path / "meta.json")
     monkeypatch.delenv("FIRMS_MAP_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
 
 def test_calendar_and_csv(tmp_path, monkeypatch):
@@ -59,7 +58,6 @@ def demo_data(tmp_path_factory):
     mp.setattr(config, "HARMONIZED", root / "h")
     mp.setattr(config, "META", root / "meta.json")
     mp.delenv("FIRMS_MAP_KEY", raising=False)
-    mp.delenv("ANTHROPIC_API_KEY", raising=False)
     demo.generate(root / "raw", end=dt.date(2026, 11, 15), regions=[demo.REGIONS[0]])
     run.main(str(root / "raw"))
     yield TestClient(main.app)
