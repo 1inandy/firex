@@ -1,0 +1,5 @@
+-r requirements.txt
+pyarrow==26.0.1   # the pipeline writes Parquet with pandas
+uvicorn[standard]==0.54.0
+pytest==9.2.0
+httpx==0.28.1
