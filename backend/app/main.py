@@ -1,4 +1,4 @@
-"""firex API.  Run: uvicorn backend.app.main:app --reload   (contract: docs/api.md)"""
+"""Plume API.  Run: uvicorn backend.app.main:app --reload   (contract: docs/api.md)"""
 from __future__ import annotations
 
 import datetime as dt
@@ -20,7 +20,7 @@ from . import queries as q
 from .area import Area
 
 load_dotenv()
-app = FastAPI(title="firex", description="Harmonized MODIS + VIIRS burning calendar")
+app = FastAPI(title="Plume", description="Harmonized MODIS + VIIRS burning calendar")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
 
 
@@ -112,7 +112,7 @@ def calendar_csv(a: Area = Depends(area_param),
     out = h.rename(columns={"fire_cell_days": "value"}).assign(median_for_month=h.month.map(med))
     cols = ["year", "month", "value", "lo", "hi", "source", "anomaly", "median_for_month", "partial",
             "raw", "raw_source"]
-    return _csv(out[cols].round(3), "firex_calendar.csv")
+    return _csv(out[cols].round(3), "plume_calendar.csv")
 
 
 @app.get("/current")
@@ -127,7 +127,7 @@ def csv(a: Area = Depends(area_param), start: str = Query(..., alias="from"), en
         f"SELECT * FROM read_parquet(?) WHERE {q._bbox_sql('latitude', 'longitude')} "
         "AND acq_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE) ORDER BY acq_date, acq_time",
         [q._require("hotspots"), *q._bbox_args(a.bbox), day(start), day(end)])
-    return _csv(a.filter(df, "latitude", "longitude"), "firex_hotspots.csv")
+    return _csv(a.filter(df, "latitude", "longitude"), "plume_hotspots.csv")
 
 
 @app.get("/cells")

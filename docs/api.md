@@ -1,4 +1,4 @@
-# firex API contract
+# Plume API contract
 
 Base URL: `http://localhost:8000` (frontend reads `?api=` override). Endpoints are GET, JSON unless noted (alerts also use POST/DELETE).
 

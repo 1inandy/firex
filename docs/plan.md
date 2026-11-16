@@ -1,4 +1,4 @@
-# Fire Memory: Harmonized Burning Calendar + Response Copilot
+# Plume: Harmonized Burning Calendar
 *NASA Space Apps 2026: "Harmonization of MODIS and VIIRS Hot Spots" (Advanced/Intermediate)*
 *Inspired by ContainOS (TreeHacks 2026 winner, OpenAI AI track 1st place)*
 

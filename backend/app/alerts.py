@@ -28,7 +28,7 @@ from pipeline import config
 from . import area as area_mod
 from . import queries as q
 
-log = logging.getLogger("firex.alerts")
+log = logging.getLogger("plume.alerts")
 _lock = threading.Lock()
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -104,7 +104,7 @@ def _message(alert: dict, st: dict) -> tuple[str, str]:
     label = alert.get("name") or ", ".join(f"{k}={v}" for k, v in alert["area"].items())
     when = f"{dt.date(st['year'], st['month'], 1):%B %Y}{' (so far)' if st['partial'] else ''}"
     ratio = f"{st['ratio']:.1f}× its historical median" if st["ratio"] is not None else "fire where the median is zero"
-    subject = f"firex alert: {label} at {ratio}"
+    subject = f"Plume alert: {label} at {ratio}"
     body = (f"{label}\n{when}: {st['value']:.0f} fire cell-days, {ratio} ({st['median']:.0f}).\n"
             f"Your threshold: {alert['threshold']:.1f}×.\nSource: {st['source']}.\n")
     return subject, body
@@ -116,7 +116,7 @@ def _send_email(to: str, subject: str, body: str) -> str:
         return "logged (SMTP_HOST not set)"
     msg = EmailMessage()
     msg["Subject"], msg["To"] = subject, to
-    msg["From"] = os.environ.get("ALERT_FROM", os.environ.get("SMTP_USER", "firex@localhost"))
+    msg["From"] = os.environ.get("ALERT_FROM", os.environ.get("SMTP_USER", "plume@localhost"))
     msg.set_content(body)
     with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=15) as s:
         s.starttls()

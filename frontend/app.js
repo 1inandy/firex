@@ -702,10 +702,10 @@ $("#brief-btn").addEventListener("click", async () => {
 });
 
 // downloads -------------------------------------------------------------
-const pngCal = () => svgToPng($("#calendar svg"), `firex_calendar_${bboxStr(state.bbox || [])}.png`,
-  `firex burning calendar · ${bboxStr(state.bbox || [])} · ${state.calMode === "anomaly" ? "anomaly vs. median" : state.calMode === "raw" ? "raw sensors (not harmonized)" : "fire cell-days"}`).catch((e) => alert(e.message));
-const pngSeason = () => svgToPng($("#season svg"), `firex_seasonality_${bboxStr(state.bbox || [])}.png`,
-  `firex seasonality · ${bboxStr(state.bbox || [])}`).catch((e) => alert(e.message));
+const pngCal = () => svgToPng($("#calendar svg"), `plume_calendar_${bboxStr(state.bbox || [])}.png`,
+  `Plume burning calendar · ${bboxStr(state.bbox || [])} · ${state.calMode === "anomaly" ? "anomaly vs. median" : state.calMode === "raw" ? "raw sensors (not harmonized)" : "fire cell-days"}`).catch((e) => alert(e.message));
+const pngSeason = () => svgToPng($("#season svg"), `plume_seasonality_${bboxStr(state.bbox || [])}.png`,
+  `Plume seasonality · ${bboxStr(state.bbox || [])}`).catch((e) => alert(e.message));
 $("#png-calendar").addEventListener("click", pngCal);
 $("#dl-png-cal").addEventListener("click", pngCal);
 $("#png-season").addEventListener("click", pngSeason);
@@ -883,7 +883,7 @@ async function boot() {
     health = await getJSON("/health");
   } catch (e) {
     $("#coverage").innerHTML = `<span class="dot bad"></span>API offline`;
-    showBanner(`Can't reach the firex API at <code>${API.replace(/</g, "&lt;")}</code>. Start it with <code>uvicorn backend.app.main:app --port 8000</code>, or pass <code>?api=URL</code>.`, true);
+    showBanner(`Can't reach the Plume API at <code>${API.replace(/</g, "&lt;")}</code>. Start it with <code>uvicorn backend.app.main:app --port 8000</code>, or pass <code>?api=URL</code>.`, true);
     if (urlArea) { setArea(urlArea); drawSelection(state.area); }
     fields.from.value = urlFrom || "2001-01"; fields.to.value = urlTo || nowYM();
     return;
