@@ -1,13 +1,11 @@
 import {
   MONTHS, MONTHS_LONG, viridis, countT, fmt, fmtRatio, niceTicks,
   calendarSVG, cellLabel, seasonalitySVG, validationSVG, svgToPng, calValue, OVERLAP_START,
-  RAW_NAMES, sourceNote, rawNote,
+  RAW_NAMES, sourceNote, rawNote, snppEra,
 } from "./charts.js";
 
-// ?api= wins. Local dev (frontend served on its own port) talks to the API on :8000; everywhere else
-// the API is mounted same-origin under /api (production).
-const LOCAL_DEV = ["localhost", "127.0.0.1"].includes(location.hostname) && location.port !== "8000";
-const API = (new URLSearchParams(location.search).get("api") || (LOCAL_DEV ? "http://localhost:8000" : `${location.origin}/api`)).replace(/\/$/, "");
+// ?api= wins; otherwise the API is mounted same-origin under /api (`uvicorn index:app` serves both).
+const API = (new URLSearchParams(location.search).get("api") || `${location.origin}/api`).replace(/\/$/, "");
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
@@ -75,6 +73,8 @@ function setEmpty(id, msg) { body(id).replaceChildren(el("div", { class: "state"
 // ───────────────────────── dates / bbox utils ─────────────────────────
 const nowYM = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const validYM = (s) => /^\d{4}-(0[1-9]|1[0-2])$/.test(s || "");
+/** "2000-11" → "Nov 2000". */
+const ymLabel = (ym) => `${MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
 const monthStart = (ym) => `${ym}-01`;
 function monthEnd(ym) {
   const [y, m] = ym.split("-").map(Number);
@@ -438,6 +438,9 @@ function renderCalendar() {
   const tip = el("div", { id: "cal-tip", class: "tip", role: "tooltip", hidden: true });
   body("card-calendar").replaceChildren(host, tip);
   renderHandoff(d.handoff);
+  const small = $("#small-area-note");
+  small.hidden = !(d.area_km2 < 100000 && d.months.some((m) => m.source === "modis_converted"));
+  if (!small.hidden) small.textContent = `Small area (≈ ${fmt(d.area_km2, 0)} km²): areas under ~100,000 km² convert less reliably, so MODIS-converted months here carry the wider small-area 10–90% band (see the validation section below).`;
   wireCalendar(host, tip, by, years);
   renderCalTable(d, years, by);
 }
@@ -453,12 +456,12 @@ function renderHandoff(h) {
     el("strong", { text: "Sensor handoff check. " }),
     `In the same months (${span(h.overlap_years)}) VIIRS logged `,
     el("strong", { class: "accent", text: fmtX(h.viirs_per_modis) }),
-    " as many fire cell-days as MODIS over this area: that is the sensor difference, not more fire.",
+    " as many fire cell-days as MODIS over this area. Both were watching the same fires, so that ratio is the sensor difference.",
   ];
   if (h.raw_jump != null && h.harmonized_jump != null && h.before_years && h.after_years) {
-    kids.push(` Stitched together raw, the record jumps `, el("strong", { text: fmtX(h.raw_jump) }),
-      ` at ${h.after_years[0]} (${span(h.after_years)} vs. ${span(h.before_years)}); harmonized, `,
-      el("strong", { text: fmtX(h.harmonized_jump) }), ". Real year-to-year change is part of both numbers.");
+    kids.push(` Stitched together raw, the record changes by `, el("strong", { text: fmtX(h.raw_jump) }),
+      ` at ${h.after_years[0]} (${span(h.after_years)} vs. ${span(h.before_years)}): about ${fmtX(h.viirs_per_modis)} of that is what the sensor change alone would give, the rest is real change in fire between those years. Harmonized, the same comparison gives `,
+      el("strong", { text: fmtX(h.harmonized_jump) }), ".");
   }
   if (!raw) kids.push(" ", el("button", { type: "button", class: "linkish", onclick: () => setCalMode("raw"), text: "Show raw sensors" }));
   box.replaceChildren(...kids);
@@ -500,7 +503,7 @@ function wireCalendar(host, tip, by, years) {
         ? [
           el("div", {}, el("b", { text: fmt(rec.value) }), rec.partial ? " fire cell-days so far" : " fire cell-days"),
           rec.partial ? el("div", { class: "t-warn", text: "Partial: month in progress, anomaly is provisional" }) : null,
-          el("div", { class: "t-muted", text: rec.anomaly != null ? `${fmtRatio(rec.anomaly)} the ${MONTHS[m - 1]} median (${fmt(med)})${rec.partial ? ", provisional" : ""}` : `${MONTHS[m - 1]} median: ${fmt(med)}` }),
+          el("div", { class: "t-muted", text: rec.anomaly != null ? `${fmtRatio(rec.anomaly)} the ${MONTHS[m - 1]} median (${fmt(med)})${rec.partial ? ", provisional" : ""}` : `No comparison: ${MONTHS[m - 1]} median is ${fmt(med)}` }),
           el("div", { class: "t-muted", text: sourceNote(rec, y, m, state.health) }),
         ]
         : el("div", { class: "t-muted", text: "No data" }),
@@ -558,8 +561,9 @@ function renderCalTable(d, years, by) {
     const v = state.calMode === "anomaly" ? (r.anomaly != null ? fmtRatio(r.anomaly) : "n/a") : fmt(calValue(r, state.calMode));
     return r.partial ? `${v}†` : v;
   };
-  const n20 = d.months.some((r) => r.source === "noaa20_converted");
-  const n20Note = n20 ? ` Months after ${state.health?.snpp_end || "the end of Suomi NPP"}: NOAA-20 ${raw ? "VIIRS" : "converted to Suomi NPP units"}.` : "";
+  const n20 = d.months.filter((r) => r.source === "noaa20_converted");
+  const n20Late = n20.some((r) => !snppEra(r.year, r.month, state.health));
+  const n20Note = !n20.length ? "" : ` ${n20Late ? `Months after ${state.health?.snpp_end || "the end of Suomi NPP"}` : "Months with a Suomi NPP outage"}: NOAA-20 ${raw ? "VIIRS" : "converted to Suomi NPP units"}.`;
   const caption = (raw ? `Raw fire cell-days, not harmonized: MODIS before ${OVERLAP_START} (* rows), VIIRS after. † = month in progress (so far).`
     : state.calMode === "anomaly" ? "Value ÷ monthly median. * = MODIS converted to VIIRS-equivalent. † = month in progress (provisional)."
     : "Fire cell-days per month. * = MODIS converted to VIIRS-equivalent. † = month in progress (so far).") + n20Note;
@@ -597,11 +601,16 @@ function renderSummary() {
   const stat = (label, value, sub) => el("div", { class: "stat" },
     el("div", { class: "stat-label", text: label }), el("div", { class: "stat-value", text: value }), sub ? el("div", { class: "stat-sub", text: sub }) : null);
   const trend = s.trend_per_decade_pct;
+  // Only a significant slope is shown as a trend; otherwise the number is muted and labelled as noise-compatible.
+  const weak = trend != null && s.trend_significant === false;
+  const trendStat = stat("Trend", trend == null ? "–" : `${trend > 0 ? "+" : ""}${fmt(trend, 1)}%`,
+    trend == null ? "too few years" : weak ? `per decade · not statistically significant${s.trend_t != null ? ` (t = ${s.trend_t.toFixed(1)})` : ""}` : "per decade");
+  if (weak) trendStat.classList.add("weak");
   const stats = el("div", { class: "stats" },
     s.peak_year ? stat("Peak year", String(s.peak_year.year), `${fmt(s.peak_year.value)} cell-days`) : null,
     s.peak_month ? stat("Peak month", `${MONTHS[s.peak_month.month - 1]} ${s.peak_month.year}`, `${fmt(s.peak_month.value)} cell-days`) : null,
     s.typical_peak_month ? stat("Typical peak", MONTHS_LONG[s.typical_peak_month - 1], "highest median month") : null,
-    stat("Trend", trend == null ? "–" : `${trend > 0 ? "+" : ""}${fmt(trend, 1)}%`, trend == null ? "too few years" : "per decade"),
+    trendStat,
     s.total != null ? stat("Total", fmt(s.total, 0), `cell-days, ${state.from}…${state.to}`) : null,
   );
   const kids = [stats];
@@ -769,22 +778,37 @@ async function loadValidation(bbox) {
     // 2. spatial holdout
     const sp = v.spatial;
     if (sp?.annual_abs_error_pct != null) {
-      kids.push(h("Does it work on areas it never saw?"));
+      kids.push(h("Does it transfer across the region’s grid cells?"));
       kids.push(p(`Spatial holdout${sp.description ? ` (${sp.description})` : ""}: annual error `, el("strong", { text: pct(sp.annual_abs_error_pct) }),
         `, monthly MAPE ${pct(sp.mape_monthly_pct)}`, sp.r2 != null ? `, R² ${sp.r2.toFixed(2)}` : "",
-        ". This matters because you draw your own area: the fit has to transfer to cells it was not trained on."));
+        ". This tests transfer across the region’s grid cells. Neighbouring cells share the same fires, so it is not an independent test, and it is scored on the whole region, not on a small area."));
       if (sp.methods?.length > 1) kids.push(methodTable("Every method on the spatial holdout", sp.methods));
+    }
+
+    // 2b. small areas: the conversion scored tile by tile
+    const sa = (v.small_area || []).filter((t) => t.median_annual_abs_error_pct != null);
+    if (sa.length) {
+      const tileKm2 = (deg) => (deg >= 1 ? "≈ 10,000 km²" : deg >= 0.25 ? "≈ 600 km²" : `≈ ${fmt((deg * 111) ** 2, 0)} km²`);
+      const whole = (x) => `${Math.round(x)}%`;
+      kids.push(h("How well does it work on a small area?"));
+      kids.push(p("Less well than on the whole region. The same held-out-year conversion, scored on single tiles instead of the regional total:"));
+      kids.push(el("ul", { class: "val-list" }, sa.map((t) => el("li", {},
+        `For a single ${t.tile_deg}° tile (${tileKm2(t.tile_deg)}) the median annual error is `, el("strong", { text: whole(t.median_annual_abs_error_pct) }),
+        t.p90_annual_abs_error_pct != null ? ` (1 in 10 tile-years worse than ${whole(t.p90_annual_abs_error_pct)})` : "",
+        t.band ? `, so areas of that size get the wider band ${t.band[0].toFixed(2)}×–${t.band[1].toFixed(2)}×` : "",
+        t.n_tile_years ? ` (${fmt(t.n_tile_years, 0)} tile-years).` : "."))));
+      kids.push(p("Areas under ~100,000 km² are given the 1° band and areas under ~3,000 km² the 0.25° band automatically; the bands in the calendar tooltips and CSV are already widened."));
     }
 
     // 3. drift stress test
     const dt = v.drift_test;
     if (dt?.annual?.length) {
-      const sats = v.drift_from ? Object.entries(v.drift_from).map(([s, y]) => `${s} since ~${y}`).join(", ") : "";
+      const df = v.drift_from || {};
       kids.push(h(`Stress test: MODIS orbit drift (${span(dt.years)})`));
-      kids.push(p(`Terra and Aqua have been drifting to earlier overpass times${sats ? ` (${sats})` : ""}, so late-mission MODIS sees a cooler part of the daily fire cycle and fewer fires. `,
+      kids.push(p(`Terra has been drifting to earlier overpass times${df.Terra ? ` (since ~${df.Terra})` : ""} and Aqua to later ones${df.Aqua ? ` (free drift since ~${df.Aqua})` : ""}, so late-mission MODIS samples a different part of the daily fire cycle, which may change how many fires it detects. `,
         `Applying the ${v.train_years ? span(v.train_years) : "fit-window"} conversion to these later years gives an annual error of `, el("strong", { text: pct(dt.annual_abs_error_pct) }),
         " and a mean bias of ", el("strong", { text: signed(dt.mean_bias_pct) }),
-        dt.mean_bias_pct < 0 ? " (converted MODIS comes out too low, the direction drift would push it)" : "",
+        dt.mean_bias_pct < 0 ? " (converted MODIS comes out too low; drift can bias it this way, but these few years do not prove the cause)" : "",
         `. The converted record (before ${OVERLAP_START}) predates the drift and these years are measured by VIIRS directly, so this bias is reported as a limit of MODIS, not applied as a correction.`));
       kids.push(yearTable("Drift years: converted MODIS vs. measured VIIRS (fire cell-days per year)", dt.annual, "From MODIS"));
     }
@@ -792,7 +816,7 @@ async function loadValidation(bbox) {
     // 4. uncertainty band
     if (v.band && v.band_coverage_pct != null) {
       kids.push(h("Is the 10–90% band honest?"));
-      kids.push(p(`Converted months carry a band of ${v.band[0].toFixed(2)}× to ${v.band[1].toFixed(2)}× the estimate, set from the leave-one-year-out errors. Measured on the ${v.band_coverage_on || "held-out months"}, `,
+      kids.push(p(`For the region as a whole, MODIS-converted months carry a band of ${v.band[0].toFixed(2)}× to ${v.band[1].toFixed(2)}× the estimate, set from the leave-one-year-out errors (small areas get the wider bands above; the Terra-only and NOAA-20 factors take their bands from year-to-year spread instead). Measured on the ${v.band_coverage_on || "held-out months"}, `,
         el("strong", { text: pct(v.band_coverage_pct) }), " of months fell inside it. A perfectly calibrated 10–90% band would hold 80%",
         v.band_coverage_pct < 80 ? ", so on those years it is somewhat too narrow." : "."));
     }
@@ -801,7 +825,7 @@ async function loadValidation(bbox) {
     const nb = v.noaa20_bridge;
     if (nb?.annual?.length) {
       kids.push(h("NOAA-20 → Suomi NPP bridge"));
-      kids.push(p("Suomi NPP stopped delivering observations on 2 November 2026, so later months come from the VIIRS on NOAA-20, scaled to Suomi NPP units with a monthly factor. ",
+      kids.push(p("Suomi NPP stopped delivering observations on 2 November 2026, so later months (and earlier months with a Suomi NPP outage) come from the VIIRS on NOAA-20, scaled to Suomi NPP units with a monthly factor. ",
         `Checked on ${span(nb.years)}, when both satellites flew (each year held out in turn): annual error `, el("strong", { text: pct(nb.annual_abs_error_pct) }), "."));
       kids.push(yearTable("Converted NOAA-20 vs. measured Suomi NPP (fire cell-days per year)", nb.annual, "From NOAA-20"));
     }
@@ -825,6 +849,26 @@ function showBanner(html, err = false) {
   b.innerHTML = html;
   b.classList.toggle("err", err);
   b.hidden = false;
+}
+
+// Outage ranges per sensor group from /health, one line per sensor in "How we harmonize".
+const OUTAGE_NAMES = { MODIS: "MODIS (Terra and Aqua together)", TERRA: "Terra", AQUA: "Aqua", VIIRS: "S-NPP", NOAA20: "NOAA-20" };
+function outageRange([a, b]) {
+  const d = (s) => Number(s.slice(8, 10)), mon = (s) => MONTHS[Number(s.slice(5, 7)) - 1], y = (s) => s.slice(0, 4);
+  if (a === b) return `${d(a)} ${mon(a)} ${y(a)}`;
+  if (y(a) !== y(b)) return `${d(a)} ${mon(a)} ${y(a)}–${d(b)} ${mon(b)} ${y(b)}`;
+  return a.slice(5, 7) === b.slice(5, 7) ? `${d(a)}–${d(b)} ${mon(b)} ${y(b)}` : `${d(a)} ${mon(a)}–${d(b)} ${mon(b)} ${y(b)}`;
+}
+function renderOutages(outages) {
+  const host = $("#how-outages");
+  const rows = Object.entries(outages || {}).filter(([, r]) => r?.length);
+  if (!host || !rows.length) return;
+  host.replaceChildren(
+    el("strong", { text: "Outages. " }),
+    "Days when a satellite delivered no data are detected from the archive. They are kept out of the fits and the validation, and in the record the missing days of a month are filled from the days that were observed (or, for Suomi NPP, from NOAA-20 when it saw more of the month). The affected calendar cells say so.",
+    el("ul", { class: "val-list" }, rows.map(([k, r]) => el("li", {}, el("strong", { text: `${OUTAGE_NAMES[k] || k}: ` }), r.map(outageRange).join(", ")))),
+  );
+  host.hidden = false;
 }
 
 async function loadRegions() {
@@ -854,20 +898,23 @@ async function boot() {
     health = await getJSON("/health");
   } catch (e) {
     $("#coverage").innerHTML = `<span class="dot bad"></span>API offline`;
-    showBanner(`Can't reach the Plume API at <code>${API.replace(/</g, "&lt;")}</code>. Start it with <code>uvicorn backend.app.main:app --port 8000</code>, or pass <code>?api=URL</code>.`, true);
+    showBanner(`Can't reach the Plume API at <code>${API.replace(/</g, "&lt;")}</code>. Start it with <code>uvicorn index:app --port 8000</code>, or pass <code>?api=URL</code>.`, true);
     if (urlArea) { setArea(urlArea); drawSelection(state.area); }
-    fields.from.value = urlFrom || "2001-01"; fields.to.value = urlTo || nowYM();
+    fields.from.value = urlFrom || "2000-11"; fields.to.value = urlTo || nowYM();
     return;
   }
   state.health = health;
   state.coverage = health.coverage || null;
-  const covFrom = state.coverage?.from || "2001-01", covTo = state.coverage?.to || nowYM();
+  const covFrom = state.coverage?.from || "2000-11", covTo = state.coverage?.to || nowYM();
+  const recordSpan = `${ymLabel(covFrom)} – ${ymLabel((health.max_date || covTo).slice(0, 7))}`;
+  if (health.data_ready) document.querySelectorAll(".record-span").forEach((n) => (n.textContent = recordSpan));
+  renderOutages(health.outages);
   fields.from.min = fields.to.min = covFrom;
   fields.from.max = fields.to.max = covTo;
   fields.from.value = urlFrom || covFrom;
   fields.to.value = urlTo || covTo;
   $("#coverage").innerHTML = health.data_ready
-    ? `<span class="dot ok"></span>Data ${covFrom} → ${health.max_date || covTo}${health.synthetic ? " · demo" : ""}`
+    ? `<span class="dot ok"></span>Data ${recordSpan}${health.synthetic ? " · demo" : ""}`
     : `<span class="dot bad"></span>No data built`;
 
   if (health.method === "ratio") {

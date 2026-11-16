@@ -124,7 +124,7 @@ input[aria-invalid="true"] { border-color: var(--bad); }
 /* ───── map ───── */
 #map { flex: 1; min-height: 320px; background: #0b0d10; }
 .leaflet-container { font: 12px var(--font); }
-.leaflet-bar a, .leaflet-bar a:hover { background: var(--panel); color: var(--text); border-bottom-color: var(--line-2); }
+.leaflet-bar a, .leaflet-bar a:hover { background-color: var(--panel); color: var(--text); border-bottom-color: var(--line-2); }
 .leaflet-draw-toolbar a { background-color: #e6e9ee !important; }
 .leaflet-control-attribution { background: rgba(14,17,22,.75) !important; color: var(--muted); }
 .leaflet-control-attribution a { color: #b8c0ca; }
@@ -211,6 +211,7 @@ table.data caption { text-align: left; color: var(--muted); padding-bottom: 4px;
 .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .stat-value { font-size: 18px; font-weight: 600; margin-top: 2px; }
 .stat-sub { font-size: 11.5px; color: var(--muted); }
+.stat.weak .stat-value { color: var(--muted); }
 .anoms { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .anoms li { display: grid; grid-template-columns: 90px 1fr auto; gap: 10px; align-items: center; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .anoms .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
@@ -279,6 +280,8 @@ table.data.methods td.best { color: var(--good); font-weight: 600; }
 .val-h { font-size: 13px; font-weight: 600; margin: 16px 0 4px; }
 .val-p { font-size: 13px; color: #c7cdd5; margin: 0 0 6px; max-width: 680px; }
 .val-p strong { color: var(--text); }
+.val-list { font-size: 13px; color: #c7cdd5; margin: 0 0 6px; padding-left: 18px; max-width: 680px; }
+.val-list strong { color: var(--text); }
 #validation .table-scroll { max-width: 680px; }
 #validation .kv dd { white-space: normal; }
 .how-text a, .val-p a { color: var(--accent); }

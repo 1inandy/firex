@@ -82,19 +82,23 @@ export function calendarSVG(data, mode, coverage, health) {
   const raw = mode === "raw";
   const peak = data.summary?.peak_month;
   const covTo = coverage?.to ? coverage.to.split("-").map(Number) : null;
+  const covFrom = coverage?.from ? coverage.from.split("-").map(Number) : null;
+  // Months with a value but no anomaly (zero median, or a month in progress): nothing to compare against.
+  const noCmp = mode === "anomaly" && months.some((m) => m.value != null && m.anomaly == null);
 
   const L = 58, T = 26, cw = 36, ch = 17, gap = 2;
-  const W = L + 12 * (cw + gap) + 10 + (months.some((m) => m.partial) ? 60 : 0);
+  const W = L + 12 * (cw + gap) + 10 + (months.some((m) => m.partial) || noCmp || raw ? 60 : 0); // room for the right-hand labels
   const gridH = years.length * (ch + gap);
   const legendY = T + gridH + 16;
   const n20 = months.some((m) => m.source === "noaa20_converted");
   const H = legendY + 64 + (n20 ? 13 : 0);
   const conv = years.filter((y) => months.some((m) => m.year === y && m.source === "modis_converted"));
 
-  const modeDesc = mode === "anomaly" ? "anomaly versus monthly median" : raw ? "raw, un-harmonized fire cell-days (MODIS before ${OVERLAP_START}, VIIRS after)" : "fire cell-days";
+  const modeDesc = mode === "anomaly" ? "anomaly versus monthly median" : raw ? `raw, un-harmonized fire cell-days (MODIS before ${OVERLAP_START}, VIIRS after)` : "fire cell-days";
   let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" tabindex="-1" role="group" aria-label="Burning calendar, ${years[0]} to ${years.at(-1)}, colored by ${modeDesc}. Use arrow keys to move between months.">`;
   s += `<defs>${gradientDef("g-count", (t) => viridis(t))}${gradientDef("g-anom", diverging)}`;
-  s += `<pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="4" fill="#2a313b"/><line x1="0" y1="0" x2="0" y2="4" stroke="${C.muted}" stroke-width="1.6"/></pattern></defs>`;
+  s += `<pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="4" fill="#2a313b"/><line x1="0" y1="0" x2="0" y2="4" stroke="${C.muted}" stroke-width="1.6"/></pattern>`;
+  s += `<pattern id="nocmp" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)"><rect width="5" height="5" fill="${C.missing}"/><line x1="0" y1="0" x2="0" y2="5" stroke="${C.muted}" stroke-width="1"/></pattern></defs>`;
   s += `<rect width="${W}" height="${H}" fill="${C.bg}"/>`;
 
   // month header
@@ -114,12 +118,13 @@ export function calendarSVG(data, mode, coverage, health) {
     for (let mo = 1; mo <= 12; mo++) {
       const x = L + (mo - 1) * (cw + gap);
       const d = by.get(`${y}-${mo}`);
-      const future = covTo && (y > covTo[0] || (y === covTo[0] && mo > covTo[1]));
+      const future = (covTo && (y > covTo[0] || (y === covTo[0] && mo > covTo[1]))) ||
+        (covFrom && (y < covFrom[0] || (y === covFrom[0] && mo < covFrom[1]))); // outside the record
       let fill;
       const v = calValue(d, mode);
       if (!d || v == null) fill = future ? "none" : C.missing;
       else if (raw) fill = viridis(countT(v, max));
-      else if (mode === "anomaly") fill = d.anomaly == null ? (d.value > 0 ? diverging(1) : diverging(0.5)) : diverging(anomalyT(d.anomaly));
+      else if (mode === "anomaly") fill = d.anomaly == null ? "url(#nocmp)" : diverging(anomalyT(d.anomaly));
       else fill = viridis(countT(d.value, max));
       if (future && (!d || v == null)) continue;
       s += `<rect class="cell" data-y="${y}" data-m="${mo}" x="${x}" y="${yy}" width="${cw}" height="${ch}" rx="2" fill="${fill}" tabindex="-1" role="img" aria-label="${esc(cellLabel(y, mo, d, data, mode, health))}"/>`;
@@ -171,16 +176,25 @@ export function calendarSVG(data, mode, coverage, health) {
   if (hasPartial) {
     s += `<rect x="${kx + 72 + 18}" y="${legendY - 3}" width="12" height="9" rx="1.5" fill="none" stroke="#fff" stroke-width="1.3" stroke-dasharray="3 2"/>` + txt(kx + 72 + 35, legendY + 5, "In progress", { size: 10 });
   }
+  if (noCmp) {
+    s += `<rect x="${kx + 72 + 18}" y="${legendY + 12}" width="12" height="9" rx="1.5" fill="url(#nocmp)"/>` + txt(kx + 72 + 35, legendY + 20, "No comparison", { size: 10 });
+  }
   if (raw && hi > 0) {
     s += `<line x1="${kx}" x2="${kx + 12}" y1="${legendY + 16}" y2="${legendY + 16}" stroke="${C.accent}" stroke-width="2" stroke-dasharray="4 2"/>` + txt(kx + 17, legendY + 20, "Sensor switch", { size: 10 });
-    s += txt(lx, legendY + 50, `Before ${OVERLAP_START}: raw MODIS. From ${OVERLAP_START}: raw VIIRS. The jump at the line is the sensor change, not more fire.`, { size: 9.5 });
+    const ho = data.handoff;
+    s += txt(lx, legendY + 50, `Raw MODIS before ${OVERLAP_START}, raw VIIRS after. ` + (ho?.viirs_per_modis != null && ho.overlap_years
+      ? `Flown together (${ho.overlap_years[0]}–${ho.overlap_years[1]}), VIIRS logged ${ho.viirs_per_modis.toFixed(2)}× MODIS here.`
+      : "Part of the jump at the line is the sensor change."), { size: 9.5 });
   } else if (conv.length) {
     s += `<rect x="${kx + 3}" y="${legendY + 27}" width="5" height="10" fill="url(#hatch)"/>` + txt(kx + 17, legendY + 35, `MODIS → VIIRS-equiv.`, { size: 10 });
     s += txt(lx, legendY + 50, `Hatched years (${conv[0]}–${conv.at(-1)}): MODIS converted to VIIRS-equivalent; later years VIIRS measured.`, { size: 9.5 });
   }
   if (n20) {
     const end = health?.snpp_end ? ` (after ${health.snpp_end})` : "";
-    s += txt(lx, legendY + 63, raw ? `Suomi NPP stopped on 2 Nov 2026: later months${end} are raw NOAA-20 VIIRS.`
+    // NOAA-20 months while Suomi NPP was still flying are outage fill-ins, not the post-S-NPP record.
+    const late = months.some((m) => m.source === "noaa20_converted" && !snppEra(m.year, m.month, health));
+    s += txt(lx, legendY + 63, !late ? `Months with a Suomi NPP outage use ${raw ? "raw NOAA-20 VIIRS" : "NOAA-20, converted to Suomi NPP units"}.`
+      : raw ? `Suomi NPP stopped on 2 Nov 2026: later months${end} are raw NOAA-20 VIIRS.`
       : `Suomi NPP stopped on 2 Nov 2026: later months${end} are NOAA-20 converted to Suomi NPP units.`, { size: 9.5 });
   }
   s += "</svg>";
@@ -193,23 +207,41 @@ const band = (d) => (d.lo != null && d.hi != null && d.lo !== d.hi ? ` · 10–9
 const terraOnly = (y, mo, health) =>
   !!health?.aqua_first_month && `${y}-${String(mo).padStart(2, "0")}` < health.aqua_first_month;
 
+/** True for a month Suomi NPP was still flying (`/health` → snpp_end): NOAA-20 there means an S-NPP outage. */
+export const snppEra = (y, mo, health) =>
+  !!health?.snpp_end && `${y}-${String(mo).padStart(2, "0")}` <= health.snpp_end;
+const SENSOR_SHORT = { modis: "MODIS", viirs: "S-NPP", noaa20: "NOAA-20", modis_converted: "MODIS", noaa20_converted: "NOAA-20" };
+/** " · S-NPP observed 39% of days (missing days filled)" when the month's sensor had an outage; else "". */
+function observedNote(d, src, filled = true) {
+  if (d.observed == null || d.observed >= 1) return "";
+  return ` · ${SENSOR_SHORT[src] || "Sensor"} observed ${Math.round(d.observed * 100)}% of days` +
+    (filled ? " (missing days filled)" : " (missing days not filled here)");
+}
+
 /** One line saying where a harmonized month's value comes from. */
 export function sourceNote(d, y, mo, health) {
+  const obs = observedNote(d, d.source);
   if (d.source === "modis_converted") {
     return `MODIS converted to VIIRS-equivalent${band(d)}` +
-      (terraOnly(y, mo, health) ? ` · Terra only (Aqua data starts ${health.aqua_first_month}), scaled up to Terra+Aqua first` : "");
+      (terraOnly(y, mo, health) ? ` · Terra only (Aqua data starts ${health.aqua_first_month}), scaled up to Terra+Aqua first` : "") + obs;
   }
-  if (d.source === "noaa20_converted") return `NOAA-20 VIIRS converted to Suomi NPP units (Suomi NPP stopped on 2 Nov 2026)${band(d)}`;
-  return "VIIRS (Suomi NPP) measured";
+  if (d.source === "noaa20_converted") {
+    return (snppEra(y, mo, health) ? "S-NPP outage: NOAA-20 used, converted to Suomi NPP units"
+      : "NOAA-20 VIIRS converted to Suomi NPP units (Suomi NPP stopped on 2 Nov 2026)") + band(d) + obs;
+  }
+  return "VIIRS (Suomi NPP) measured" + obs;
 }
 /** Same, for the raw (un-harmonized) view. */
 export function rawNote(d, y, mo, health) {
+  const obs = observedNote(d, d.raw_source, false);
   if (d.raw_source === "modis") {
     return "Not converted: MODIS sees fewer, larger pixels" +
-      (terraOnly(y, mo, health) ? ` · Terra only (Aqua data starts ${health.aqua_first_month})` : "");
+      (terraOnly(y, mo, health) ? ` · Terra only (Aqua data starts ${health.aqua_first_month})` : "") + obs;
   }
-  if (d.raw_source === "noaa20") return "NOAA-20 VIIRS as measured (Suomi NPP stopped on 2 Nov 2026)";
-  return "VIIRS (Suomi NPP) measured";
+  if (d.raw_source === "noaa20") {
+    return (snppEra(y, mo, health) ? "S-NPP outage: NOAA-20 VIIRS used, as measured" : "NOAA-20 VIIRS as measured (Suomi NPP stopped on 2 Nov 2026)") + obs;
+  }
+  return "VIIRS (Suomi NPP) measured" + obs;
 }
 
 export function cellLabel(y, mo, d, data, mode = "counts", health = null) {
@@ -223,7 +255,8 @@ export function cellLabel(y, mo, d, data, mode = "counts", health = null) {
   let s = `${name}: ${fmt(d.value)} fire cell-days`;
   if (d.partial) s += " so far (month in progress)";
   if (d.anomaly != null) s += `, ${fmtRatio(d.anomaly)} the ${MONTHS[mo - 1]} median of ${fmt(med)}${d.partial ? " (provisional)" : ""}`;
-  else if (med === 0) s += `, ${MONTHS[mo - 1]} median is 0`;
+  else if (med === 0) s += `, no comparison: ${MONTHS[mo - 1]} median is 0`;
+  else s += ", no comparison with the median";
   return `${s}. ${sourceNote(d, y, mo, health)}`;
 }
 

@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%23f0a04b%22/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
   <link rel="stylesheet" href="styles.css" />
@@ -19,7 +20,7 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
       <span class="brand-name">Plume</span>
-      <span class="brand-sub">Harmonized MODIS + VIIRS fire record, 2001 to now</span>
+      <span class="brand-sub">Harmonized MODIS + VIIRS fire record, <span class="record-span">from Nov 2000</span></span>
     </div>
     <div class="topbar-meta" id="coverage" aria-live="polite"></div>
   </header>
@@ -62,8 +63,8 @@
         </div>
 
         <div class="ctrl-row dates">
-          <label>From <input id="f-from" type="month" min="2001-01" required /></label>
-          <label>To <input id="f-to" type="month" min="2001-01" required /></label>
+          <label>From <input id="f-from" type="month" min="2000-11" required /></label>
+          <label>To <input id="f-to" type="month" min="2000-11" required /></label>
           <button type="submit" class="btn btn-primary">Analyze area</button>
         </div>
         <p id="form-error" class="form-error" role="alert"></p>
@@ -71,7 +72,7 @@
           <span id="area-readout" class="small muted">No area selected.</span>
           <label class="toggle small"><input type="checkbox" id="cells-toggle" checked /> Fire cells on map</label>
         </div>
-        <p class="small muted area-note">Areas are resolved on the 0.05° (~5 km) grid: a cell counts if its centre is inside the shape. The hotspot CSV uses exact detection positions.</p>
+        <p class="small muted area-note">Areas are resolved on the 0.05° (~5 km) grid: a cell counts if its centre is inside the shape. The hotspot CSV uses exact detection positions. Areas under ~100,000 km² automatically get a wider uncertainty band on converted months.</p>
       </form>
       <div id="map" role="region" aria-label="Map. Draw a rectangle, polygon or circle to choose an area; coordinates can also be typed above."></div>
     </section>
@@ -80,7 +81,7 @@
     <section id="analysis" class="right" aria-label="Analysis" tabindex="-1">
       <div id="empty" class="empty">
         <h1>Pick an area to see its burning calendar</h1>
-        <p>Draw a rectangle, polygon or circle on the map, type coordinates, or choose a quick pick. Plume merges MODIS (2001→) and VIIRS (2012→) fire detections into one VIIRS-equivalent record of <em>fire cell-days</em>: the number of 0.05° grid cells with at least one vegetation-fire detection on a given day.</p>
+        <p>Draw a rectangle, polygon or circle on the map, type coordinates, or choose a quick pick. Plume merges MODIS (Nov 2000→) and VIIRS (2012→) fire detections into one VIIRS-equivalent record of <em>fire cell-days</em>: the number of 0.05° grid cells with at least one vegetation-fire detection on a given day.</p>
       </div>
 
       <div id="cards" hidden>
@@ -109,6 +110,7 @@
           </header>
           <p class="card-sub">Fire cell-days per month (VIIRS-equivalent, in Suomi NPP units). Hover or focus a cell; use arrow keys to move. <em>Raw sensors</em> shows the record without harmonization.</p>
           <p id="handoff" class="handoff" hidden></p>
+          <p id="small-area-note" class="card-sub" hidden></p>
           <div class="card-body cal-wrap">
             <div id="calendar"></div>
             <div id="cal-tip" class="tip" role="tooltip" hidden></div>
@@ -167,13 +169,14 @@
           <p id="how-ratio"><strong>Learn the conversion.</strong> On overlap years (2012–2019, before the MODIS orbits drifted) we fit, for each calendar month, how many VIIRS cell-days each MODIS cell-day is worth, separately for weak and strong (high-FRP) MODIS detections. VIIRS’ finer pixels add far more detections around small, weak fires than around big intense ones, so one flat ratio would overstate big-wildfire years. A simple monthly ratio is kept as a baseline for comparison.</p>
           <p><strong>Alternative: quantile mapping.</strong> For each month we also match the distribution of per-cell MODIS fire days to the VIIRS distribution (a cell with <em>k</em> MODIS fire days maps to the VIIRS count at the same percentile, scaled for the extra cells VIIRS lights up). All methods are scored the same way below; the one marked “in use” is set in <code>pipeline/config.py</code>.</p>
           <p><strong>Convert.</strong> MODIS-only years (before 2012) are converted with that monthly fit, so the whole record reads in VIIRS-equivalent units. Months before July 2002 had only Terra (Aqua had not started), so they are first scaled up to Terra+Aqua. Converted months carry a 10–90% uncertainty band in the calendar tooltips.</p>
-          <p><strong>After Suomi NPP.</strong> The VIIRS record here is the one on Suomi NPP, which <a href="https://www.earthdata.nasa.gov/data/alerts-outages/reminder-new-suomi-npp-observations-cease-november-2-2026" target="_blank" rel="noopener">stopped delivering new observations on 2 November 2026</a>. Later months, including the live current month, come from the VIIRS on NOAA-20, scaled to Suomi NPP units with a factor fitted while both satellites flew.</p>
+          <p id="how-outages" hidden></p>
+          <p><strong>After Suomi NPP.</strong> The VIIRS record here is the one on Suomi NPP, which <a href="https://www.earthdata.nasa.gov/data/alerts-outages/reminder-new-suomi-npp-observations-cease-november-2-2026" target="_blank" rel="noopener">stopped delivering new observations on 2 November 2026</a>. Later months (and the live current month, when the server has a FIRMS key) come from the VIIRS on NOAA-20, scaled to Suomi NPP units with a factor fitted while both satellites flew.</p>
         </div>
         <div id="validation" class="card-body" aria-live="polite"></div>
       </details>
 
       <footer class="foot small muted">
-        Data: NASA FIRMS (MODIS C6.1; VIIRS 375 m on Suomi NPP and NOAA-20). Basemap © Esri, HERE, Garmin, © OpenStreetMap contributors. NASA Space Apps 2026.
+        Data: NASA FIRMS (MODIS C6.1; VIIRS 375 m on Suomi NPP and NOAA-20). Record: <span class="record-span">from Nov 2000</span>. Basemap © Esri, HERE, Garmin, © OpenStreetMap contributors. NASA Space Apps 2026.
       </footer>
     </section>
   </main>
