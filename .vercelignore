@@ -1,0 +1,13 @@
+# Upload only what the app needs (data/ is built locally by the pipeline and shipped with the deploy).
+/*
+!index.py
+!requirements.txt
+!.python-version
+!vercel.json
+!backend
+!pipeline
+!frontend
+!data
+data/raw
+data/figures
+__pycache__

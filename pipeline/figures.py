@@ -15,7 +15,7 @@ from . import config
 from .harmonize import harmonize, ratios_for_region
 
 C = {"modis": "#E69F00", "viirs": "#0072B2", "harm": "#009E73", "grid": "#d9d9d9", "text": "#222"}
-W, H, PAD = 760, 360, dict(l=64, r=20, t=56, b=44)
+W, H, PAD = 780, 380, dict(l=84, r=20, t=56, b=66)
 
 
 def _scale(v0, v1, p0, p1):
@@ -55,12 +55,13 @@ def _line(points, sx, sy, color, width=2.5, dash=""):
 
 
 def _legend(items, x, y):
+    """One row of legend entries below the plot, so it never covers data."""
     out = []
-    for i, (label, color, dash) in enumerate(items):
-        yy = y + i * 18
+    for label, color, dash in items:
         da = f' stroke-dasharray="{dash}"' if dash else ""
-        out.append(f'<line x1="{x}" x2="{x + 22}" y1="{yy}" y2="{yy}" stroke="{color}" stroke-width="3"{da}/>'
-                   f'<text x="{x + 28}" y="{yy + 4}">{escape(label)}</text>')
+        out.append(f'<line x1="{x}" x2="{x + 22}" y1="{y}" y2="{y}" stroke="{color}" stroke-width="3"{da}/>'
+                   f'<text x="{x + 28}" y="{y + 4}">{escape(label)}</text>')
+        x += 28 + 6.6 * len(label) + 24
     return out
 
 
@@ -70,7 +71,8 @@ def before_after(region: str) -> str:
     monthly = monthly[monthly.lon.between(w, e) & monthly.lat.between(s, n)]
     meta = json.loads(config.META.read_text())
     last_full_year = int(meta["last_full_month"][:4]) - (meta["last_full_month"][5:] != "12")
-    monthly = monthly[monthly.year <= last_full_year]
+    first_full_year = int(meta["min_date"][:4]) + (meta["min_date"][5:10] != "01-01")
+    monthly = monthly[monthly.year.between(first_full_year, last_full_year)]  # whole years only
     raw = monthly.groupby(["year", "family"])["fire_cell_days"].sum().unstack(fill_value=0)
     ratios = ratios_for_region(pd.read_parquet(config.HARMONIZED / "ratios.parquet"), region)
     harm = harmonize(monthly, ratios).groupby("year")["fire_cell_days"].sum()
@@ -79,7 +81,8 @@ def before_after(region: str) -> str:
     viirs = [(y, v) for y, v in raw["VIIRS"].items() if y >= config.OVERLAP_START_YEAR]
     ymax = max(raw.max().max(), harm.max()) * 1.05
     out, sx, sy = _frame(f"{config.REGIONS[region]['name']}: one fire record instead of two",
-                         "Annual fire cell-days. VIIRS sees more fires than MODIS; splicing the two fakes a jump in 2012.", x0, x1, ymax, "fire cell-days per year")
+                         "Annual fire cell-days. Watching the same fires (2012→), VIIRS counts about 2× MODIS.",
+                         x0, x1, ymax, "fire cell-days per year")
     out.append(f'<line x1="{sx(config.OVERLAP_START_YEAR - 0.5):.1f}" x2="{sx(config.OVERLAP_START_YEAR - 0.5):.1f}" '
                f'y1="{PAD["t"]}" y2="{H - PAD["b"]}" stroke="#999" stroke-dasharray="3 3"/>'
                f'<text x="{sx(config.OVERLAP_START_YEAR - 0.5) + 4:.1f}" y="{PAD["t"] + 12}" fill="#777">VIIRS starts</text>')
@@ -87,7 +90,7 @@ def before_after(region: str) -> str:
     out.append(_line(modis, sx, sy, C["modis"], 2, "6 4"))
     out.append(_line(viirs, sx, sy, C["viirs"], 2))
     out += _legend([("raw MODIS (Terra + Aqua)", C["modis"], "6 4"), ("raw VIIRS (Suomi NPP)", C["viirs"], ""),
-                    ("harmonized record (VIIRS-equivalent)", C["harm"], "")], PAD["l"] + 12, PAD["t"] + 16)
+                    ("harmonized record (VIIRS-equivalent)", C["harm"], "")], PAD["l"], H - 16)
     if meta.get("synthetic"):
         out.append(f'<text x="{W - PAD["r"]}" y="{H - 8}" text-anchor="end" fill="#a00">synthetic demo data</text>')
     return "\n".join(out + ["</svg>"])
@@ -100,15 +103,15 @@ def validation(region: str) -> str:
     ymax = max(m.predicted.max(), m.observed.max()) * 1.1
     x0, x1 = int(m.year.min()), int(m.year.max())
     out, _, sy = _frame(
-        f"Harmonized MODIS predicts real VIIRS within {v['annual_abs_error_pct']}% a year",
-        f"Fit on {v['train_years'][0]}–{v['train_years'][1]}, tested on {v['test_years'][0]}–{v['test_years'][1]} "
+        f"Converted MODIS predicts real VIIRS to within {v['annual_abs_error_pct']}% a year on average",
+        f"Each year {v['test_years'][0]}–{v['test_years'][1]} predicted by a conversion fit on the other years "
         f"(never seen). Simple ratio baseline: {v['baseline']['annual_abs_error_pct']}%.",
         x0, x1, ymax, "fire cell-days per month", every=1)
     sx2 = _scale(x0, x1 + 1, PAD["l"], W - PAD["r"])
     out.append(_line(list(zip(m.t, m.observed)), sx2, sy, C["viirs"], 2.5))
     out.append(_line(list(zip(m.t, m.predicted)), sx2, sy, C["harm"], 2, "5 3"))
-    out += _legend([("observed VIIRS", C["viirs"], ""), ("predicted from MODIS", C["harm"], "5 3")],
-                   W - PAD["r"] - 200, PAD["t"] + 16)
+    out += _legend([("observed VIIRS", C["viirs"], ""), ("predicted from MODIS (year held out)", C["harm"], "5 3")],
+                   PAD["l"], H - 16)
     return "\n".join(out + ["</svg>"])
 
 

@@ -1,27 +1,28 @@
-"""firex API.  Run: uvicorn backend.app.main:app --reload   (contract: docs/api.md)"""
+"""Plume API.  Run: uvicorn backend.app.main:app --reload   (contract: docs/api.md)"""
 from __future__ import annotations
 
+import csv as csvlib
 import datetime as dt
 import io
+import os
 
+import duckdb
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
 
 from pipeline import config
 
-from . import alerts as alerts_mod
 from . import area as area_mod
 from . import brief as brief_mod
 from . import queries as q
 from .area import Area
 
 load_dotenv()
-app = FastAPI(title="firex", description="Harmonized MODIS + VIIRS burning calendar")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
+app = FastAPI(title="Plume", description="Harmonized MODIS + VIIRS burning calendar")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
 
 
 @app.exception_handler(q.NoData)
@@ -64,10 +65,39 @@ def day(v: str) -> str:
         raise HTTPException(400, f"bad date {v!r}: use YYYY-MM-DD")
 
 
+CSV_MAX_ROWS = 1_000_000  # ~70 MB of CSV; larger requests should narrow the area or dates
+CSV_BATCH = 50_000
+
+
 def _csv(df: pd.DataFrame, name: str) -> StreamingResponse:
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": f"attachment; filename={name}"})
+
+
+def _stream_csv(query: str, args: list, a: Area, name: str) -> StreamingResponse:
+    """Stream query rows as CSV in batches, so memory stays flat and the response isn't one big body."""
+    con = duckdb.connect()
+    cur = con.execute(query, args)
+    cols = [d[0] for d in cur.description]
+
+    def rows():
+        buf = io.StringIO()
+        w = csvlib.writer(buf)
+        w.writerow(cols)
+        try:
+            while batch := cur.fetchmany(CSV_BATCH):
+                df = a.filter(pd.DataFrame(batch, columns=cols), "latitude", "longitude")
+                w.writerows(df.itertuples(index=False))
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate()
+        finally:
+            con.close()
+        yield buf.getvalue()
+
+    return StreamingResponse(rows(), media_type="text/csv",
                              headers={"Content-Disposition": f"attachment; filename={name}"})
 
 
@@ -78,9 +108,13 @@ def health():
     cov = None
     if m.get("min_date"):
         cov = {"from": m["min_date"][:7], "to": m["max_date"][:7]}
+    key = os.environ.get("FIRMS_MAP_KEY", "")
     return {"ok": True, "data_ready": ready, "synthetic": bool(m.get("synthetic")), "coverage": cov,
-            "max_date": m.get("max_date"), "method": config.HARMONIZE_METHOD,
-            "overlap_start_year": config.OVERLAP_START_YEAR, "modis_drift_from": dict(config.MODIS_DRIFT_FROM)}
+            "max_date": m.get("max_date"), "snpp_end": m.get("snpp_end"), "sensors": m.get("coverage"),
+            "outages": m.get("outages"),
+            "live_nrt": bool(key) and key != "your_map_key_here", "method": config.HARMONIZE_METHOD,
+            "overlap_start_year": config.OVERLAP_START_YEAR, "modis_drift_from": dict(config.MODIS_DRIFT_FROM),
+            "aqua_first_month": "%d-%02d" % config.AQUA_FIRST_MONTH}
 
 
 @app.get("/regions")
@@ -100,7 +134,7 @@ def calendar(a: Area = Depends(area_param),
         "median_by_month": {int(k): round(float(v), 2) for k, v in med.items()},
         "seasonality": q.seasonality(h),
         "summary": q.summary(h),
-        "handoff": q.handoff(h),
+        "handoff": q.handoff(h, a),
         **meta,
     }
 
@@ -112,7 +146,7 @@ def calendar_csv(a: Area = Depends(area_param),
     out = h.rename(columns={"fire_cell_days": "value"}).assign(median_for_month=h.month.map(med))
     cols = ["year", "month", "value", "lo", "hi", "source", "anomaly", "median_for_month", "partial",
             "raw", "raw_source"]
-    return _csv(out[cols].round(3), "firex_calendar.csv")
+    return _csv(out[cols].round(3), "plume_calendar.csv")
 
 
 @app.get("/current")
@@ -122,12 +156,17 @@ def current(a: Area = Depends(area_param)):
 
 @app.get("/csv")
 def csv(a: Area = Depends(area_param), start: str = Query(..., alias="from"), end: str = Query(..., alias="to")):
-    """Cleaned hotspots for an area and date range (YYYY-MM-DD)."""
-    df = q.sql(
-        f"SELECT * FROM read_parquet(?) WHERE {q._bbox_sql('latitude', 'longitude')} "
-        "AND acq_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE) ORDER BY acq_date, acq_time",
-        [q._require("hotspots"), *q._bbox_args(a.bbox), day(start), day(end)])
-    return _csv(a.filter(df, "latitude", "longitude"), "firex_hotspots.csv")
+    """Cleaned hotspots (all sensors, as detected) for an area and date range (YYYY-MM-DD), streamed."""
+    where = (f"FROM read_parquet(?) WHERE {q._bbox_sql('latitude', 'longitude')} "
+             "AND acq_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)")
+    args = [q._require("hotspots"), *q._bbox_args(a.bbox), day(start), day(end)]
+    n = q.sql(f"SELECT count(*) AS n {where}", args).n.iloc[0]
+    if n > CSV_MAX_ROWS:
+        raise HTTPException(413, f"{n:,} hotspots in that box and date range; the limit is {CSV_MAX_ROWS:,}. "
+                                 "Narrow the area or the dates.")
+    cols = ("latitude::DOUBLE AS latitude, longitude::DOUBLE AS longitude, acq_date, acq_time, sensor, satellite, "
+            "confidence, frp::DOUBLE AS frp, daynight, type")
+    return _stream_csv(f"SELECT {cols} {where} ORDER BY acq_date, acq_time", args, a, "plume_hotspots.csv")
 
 
 @app.get("/cells")
@@ -163,42 +202,3 @@ def brief(a: Area = Depends(area_param)):
         val = None
     facts = brief_mod.build_facts(cur, q.summary(h), prec, val, bool(q.meta().get("synthetic")))
     return brief_mod.brief(facts)
-
-
-# ---------- alerts ----------
-
-class AlertIn(BaseModel):
-    bbox: str | None = None
-    poly: str | None = None
-    circle: str | None = None
-    threshold: float = Field(config.ALERT_DEFAULT_THRESHOLD, gt=1, le=20)
-    name: str | None = Field(None, max_length=80)
-    email: str | None = Field(None, max_length=254)
-    webhook: str | None = Field(None, max_length=500)
-
-
-@app.get("/alerts")
-def list_alerts():
-    return {"alerts": alerts_mod.list_with_status(), "min_cell_days": config.ALERT_MIN_CELL_DAYS}
-
-
-@app.post("/alerts", status_code=201)
-def create_alert(body: AlertIn):
-    params = {k: v for k, v in (("bbox", body.bbox), ("poly", body.poly), ("circle", body.circle)) if v}
-    try:
-        alert = alerts_mod.create(params, body.threshold, body.name, body.email, body.webhook)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return {**alerts_mod.public(alert), "status": alerts_mod.status(alert)}
-
-
-@app.delete("/alerts/{alert_id}", status_code=204)
-def delete_alert(alert_id: str):
-    if not alerts_mod.delete(alert_id):
-        raise HTTPException(404, "no such alert")
-
-
-@app.post("/alerts/check")
-def check_alerts():
-    """Evaluate all alerts and send notifications for newly triggered ones."""
-    return {"results": alerts_mod.check_all(notify=True)}

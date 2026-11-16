@@ -52,6 +52,25 @@ def test_swath_duplicates_only_within_one_overpass_and_pixel():
     assert len(clean(df)) == 4
 
 
+def test_swath_duplicates_found_far_from_the_prime_meridian():
+    # 0.89 km apart on the same overpass at lon -120: one is a duplicate.
+    base = dict(sensor="MODIS", satellite="Aqua", acq_date=dt.date(2020, 1, 1), daynight="D", frp=5.0,
+                acq_time=1330, longitude=-120.0)
+    df = pd.DataFrame([{**base, "latitude": 40.0}, {**base, "latitude": 40.008}])
+    assert swath_duplicates(df).sum() == 1
+
+
+def test_swath_duplicates_only_suppressed_by_kept_detections():
+    # A chain 0.67 km apart: the middle repeats the first, but the last (1.34 km from the first) is a
+    # separate pixel once the middle one is dropped. The brighter detection represents each duplicate pair.
+    base = dict(sensor="MODIS", satellite="Aqua", acq_date=dt.date(2020, 1, 1), daynight="D",
+                acq_time=1330, longitude=20.0)
+    df = pd.DataFrame([{**base, "latitude": 10.0, "frp": 9.0}, {**base, "latitude": 10.006, "frp": 4.0},
+                       {**base, "latitude": 10.012, "frp": 7.0}])
+    assert swath_duplicates(df).tolist() == [False, True, False]
+    assert swath_duplicates(df.iloc[::-1]).tolist() == [False, True, False]
+
+
 def test_ratio_and_harmonized_series():
     monthly = monthly_cell_days(to_grid(clean(synthetic())))
     ratios = fit_monthly_ratio(monthly)
@@ -78,7 +97,7 @@ def test_frp_strata_follows_fire_mix():
     monthly = pd.DataFrame(rows)
     r = fit_monthly_ratio(monthly).set_index("month").loc[8]
     assert (r.weak, r.strong) == pytest.approx((3.0, 1.0))
-    v = validate(monthly, train_end=2019)
+    v = validate(monthly)
     assert v["annual_abs_error_pct"] is None  # only one month per year: no complete years
     assert v["mape_monthly_pct"] == pytest.approx(0.0, abs=1e-6)
     assert v["baseline"]["mape_monthly_pct"] > 5
@@ -116,7 +135,7 @@ def test_quantile_mapping_is_per_cell_and_transfers_to_small_areas():
     r = fit_monthly_ratio(monthly).set_index("month")
     curve = r.loc[8, [f"qm_{k}" for k in range(1, 9)]].to_numpy(float)
     assert (np.diff(curve) >= 0).all()  # monotone
-    v = validate(monthly, train_end=2019, method="quantile")
+    v = validate(monthly, method="quantile")
     assert v["method"] == "quantile" and {m["method"] for m in v["methods"]} == {"ratio", "frp_strata", "quantile"}
     assert v["mape_monthly_pct"] < 10
     # A curve fit on the whole region, applied to a 10-cell "drawn area" in a MODIS-only year:
@@ -159,3 +178,90 @@ def test_events_link_adjacent_cells_across_days():
     assert sorted(ev.cell_days.tolist()) == [3, 3, 5]
     a = ev[ev.cell_days == 5].iloc[0]
     assert a.duration_days == 5 and a.start == d0
+
+
+def test_fetch_clip_keeps_only_region_and_reads_archive_schema(tmp_path):
+    from pipeline.fetch import COLUMNS, clip
+    from pipeline.firms import load_archive
+    df = pd.DataFrame({"latitude": [-30.0, -40.0, -23.0], "longitude": [-60.0, -60.0, -70.0],
+                       "acq_date": ["2020-01-01"] * 3, "acq_time": ["0425", "0005", "1330"],
+                       "satellite": ["N", "Terra", "Aqua"], "instrument": ["VIIRS", "MODIS", "MODIS"],
+                       "confidence": ["n", "64", "80"], "frp": [1.0, 2.0, 3.0], "daynight": ["N", "N", "D"],
+                       "type": [0, 0, 2]})[COLUMNS]
+    kept = clip(df, config.REGIONS["chaco"]["bbox"])
+    assert kept.latitude.tolist() == [-30.0]
+    kept.to_csv(tmp_path / "viirs-snpp_2020.csv.gz", index=False)
+    loaded = load_archive(tmp_path)
+    assert loaded.sensor.tolist() == ["VIIRS_SNPP"] and loaded.confidence.tolist() == ["n"]
+
+
+def test_terra_only_months_scaled_to_terra_plus_aqua():
+    """Before Aqua (2002-07) MODIS is Terra alone; Terra+Aqua see 1.5x Terra's cell-days, so 2001 is scaled."""
+    rows = []
+    for year in range(2001, 2020):
+        both = year >= 2003
+        modis = 15 if both else 10
+        rows.append(dict(cell_id="0_0", lat=0, lon=0, year=year, month=8, family="MODIS",
+                         fire_cell_days=modis, strong_cell_days=0, terra_cell_days=10))
+        if year >= 2012:
+            rows.append(dict(cell_id="0_0", lat=0, lon=0, year=year, month=8, family="VIIRS",
+                             fire_cell_days=30, strong_cell_days=0, terra_cell_days=0))
+    monthly = pd.DataFrame(rows)
+    r = fit_monthly_ratio(monthly).set_index("month").loc[8]
+    assert r.terra_scale == pytest.approx(1.5) and r.ratio == pytest.approx(2.0)
+    h = harmonize(monthly, method="ratio").set_index("year").fire_cell_days
+    assert h[2001] == pytest.approx(30.0) and h[2005] == pytest.approx(30.0)  # 10 Terra-only -> 15 -> x2
+
+
+def test_noaa20_bridges_the_snpp_shutdown():
+    """S-NPP sees 1.2x NOAA-20's cell-days; after S-NPP coverage ends, NOAA-20 is scaled into S-NPP units."""
+    rows = []
+    for year in range(2012, 2027):
+        for month in (2, 8):
+            rows.append(dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="MODIS",
+                             fire_cell_days=10, strong_cell_days=0))
+            if year <= 2025:
+                rows.append(dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="VIIRS",
+                                 fire_cell_days=24, strong_cell_days=0))
+            if year >= 2018:
+                rows.append(dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="NOAA20",
+                                 fire_cell_days=20, strong_cell_days=0))
+    monthly = pd.DataFrame(rows)
+    r = fit_monthly_ratio(monthly).set_index("month")
+    assert r.loc[8, "n20_scale"] == pytest.approx(1.2)
+    obs = pd.DataFrame([{"family": f, "year": y, "month": m,
+                         "frac": float(f != "VIIRS" or y <= 2025) * float(f != "NOAA20" or y >= 2018)}
+                        for f in ("MODIS", "TERRA", "AQUA", "VIIRS", "NOAA20")
+                        for y in range(2012, 2027) for m in (2, 8)])
+    h = harmonize(monthly, obs=obs).set_index(["year", "month"])
+    assert h.loc[(2026, 8), "source"] == "noaa20_converted"
+    assert h.loc[(2026, 8), "fire_cell_days"] == pytest.approx(24.0)
+    assert h.loc[(2025, 8), "source"] == "viirs" and len(h.loc[(2025, 8)].shape) == 1  # no double count
+    assert set(raw_series(monthly, obs).query("year == 2026").raw_source) == {"noaa20"}
+
+
+def test_outages_are_excluded_from_fits_and_filled_in_the_record():
+    """A month where S-NPP missed days must not bias the NOAA-20 factor, and must not read as less fire."""
+    rows, obs = [], []
+    for year in range(2014, 2026):
+        for month in (2, 11):
+            truncated = (year, month) == (2024, 11)  # S-NPP delivered only a few days
+            rows += [dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="MODIS", fire_cell_days=50,
+                          strong_cell_days=0),
+                     dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="VIIRS",
+                          fire_cell_days=2 if truncated else 100, strong_cell_days=0)]
+            if year >= 2018:
+                rows.append(dict(cell_id="0_0", lat=0, lon=0, year=year, month=month, family="NOAA20",
+                                 fire_cell_days=100, strong_cell_days=0))
+            for f in ("MODIS", "TERRA", "AQUA", "VIIRS", "NOAA20"):
+                frac = 0.1 if (f == "VIIRS" and truncated) else (0.0 if f == "NOAA20" and year < 2018 else 1.0)
+                obs.append(dict(family=f, year=year, month=month, frac=frac))
+    monthly, obs = pd.DataFrame(rows), pd.DataFrame(obs)
+    r = fit_monthly_ratio(monthly, obs=obs).set_index("month")
+    assert r.loc[11, "n20_scale"] == pytest.approx(1.0)  # without obs the truncated month would pull it down
+    assert fit_monthly_ratio(monthly).set_index("month").loc[11, "n20_scale"] < 0.9
+    h = harmonize(monthly, obs=obs).set_index(["year", "month"])
+    assert h.loc[(2024, 11), "source"] == "noaa20_converted" and h.loc[(2024, 11), "fire_cell_days"] == pytest.approx(100)
+    obs.loc[(obs.family == "NOAA20"), "frac"] = 0.0  # no NOAA-20 to swap in: scale S-NPP by the days observed
+    h = harmonize(monthly[monthly.family != "NOAA20"], fit_monthly_ratio(monthly, obs=obs), obs=obs)
+    assert h.set_index(["year", "month"]).loc[(2024, 11), "fire_cell_days"] == pytest.approx(20)
