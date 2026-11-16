@@ -20,6 +20,7 @@ def build_facts(cur: dict, summ: dict, prec: dict, val: dict | None, synthetic: 
         "peak_year_value": (summ.get("peak_year") or {}).get("value"),
         "typical_peak_month": MONTHS[summ["typical_peak_month"]] if summ.get("typical_peak_month") else None,
         "trend_per_decade_pct": summ.get("trend_per_decade_pct"),
+        "trend_significant": summ.get("trend_significant"),
         "precedent_n_events": prec.get("n_events"),
         "precedent_median_duration_days": prec.get("median_duration_days"),
         "precedent_p90_duration_days": prec.get("p90_duration_days"),
@@ -68,7 +69,7 @@ def template_text(f: dict) -> str:
                   f"across about {_fmt(f['largest_event_area_km2'])} km² of grid cells over "
                   f"{f['largest_event_duration_days']} days")
         parts.append(s + ".")
-    if f["trend_per_decade_pct"] is not None and abs(f["trend_per_decade_pct"]) >= 5:
+    if f.get("trend_significant") and abs(f["trend_per_decade_pct"]) >= 5:
         word = "rising" if f["trend_per_decade_pct"] > 0 else "falling"
         parts.append(f"The long-term record is {word} by about {_fmt(abs(f['trend_per_decade_pct']))}% per decade.")
     if f["synthetic_demo_data"]:

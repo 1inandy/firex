@@ -111,6 +111,7 @@ def health():
     key = os.environ.get("FIRMS_MAP_KEY", "")
     return {"ok": True, "data_ready": ready, "synthetic": bool(m.get("synthetic")), "coverage": cov,
             "max_date": m.get("max_date"), "snpp_end": m.get("snpp_end"), "sensors": m.get("coverage"),
+            "outages": m.get("outages"),
             "live_nrt": bool(key) and key != "your_map_key_here", "method": config.HARMONIZE_METHOD,
             "overlap_start_year": config.OVERLAP_START_YEAR, "modis_drift_from": dict(config.MODIS_DRIFT_FROM),
             "aqua_first_month": "%d-%02d" % config.AQUA_FIRST_MONTH}

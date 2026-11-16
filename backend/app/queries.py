@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import calendar as cal
 import datetime as dt
-import functools
+import time
 import json
 import os
 
@@ -107,7 +107,7 @@ def calendar_frame(a: Area, start: int, end: int) -> tuple[pd.DataFrame, pd.Seri
         return pd.DataFrame(columns=["year", "month", "fire_cell_days", "lo", "hi", "source", "anomaly",
                                      "raw", "raw_source", "partial"]), pd.Series(dtype=float)
     obs = observed()
-    h = harmonize(monthly, load_ratios(a), obs=obs)
+    h = _small_area_band(harmonize(monthly, load_ratios(a), obs=obs), a)
     h = h.merge(raw_series(monthly, obs), on=["year", "month"], how="left")
     h = _fill_missing_months(h)
     lf = last_full_month()
@@ -117,6 +117,27 @@ def calendar_frame(a: Area, start: int, end: int) -> tuple[pd.DataFrame, pd.Seri
     h = h.assign(anomaly=(h.fire_cell_days / h.month.map(med).replace(0, np.nan)).where(~h.partial))
     h = h[(key >= start) & (key <= end)]
     return h.reset_index(drop=True), med
+
+
+SMALL_AREA_KM2 = {0.25: 3_000, 1.0: 100_000}  # areas below this use the band measured on tiles of that size
+
+
+def _small_area_band(h: pd.DataFrame, a: Area) -> pd.DataFrame:
+    """Widen converted months' 10–90% band for small areas, using the out-of-sample band measured on
+    1° / 0.25° tiles (a regional band is far too narrow for a single valley or county)."""
+    from .area import area_km2
+    km2 = area_km2(a)
+    try:
+        sa = {x["tile_deg"]: x["band"] for x in validation(a).get("small_area", [])}
+    except NoData:
+        return h
+    deg = next((d for d in sorted(SMALL_AREA_KM2) if km2 < SMALL_AREA_KM2[d] and d in sa), None)
+    if deg is None or h.empty:
+        return h
+    lo, hi = sa[deg]
+    conv = h.source.eq("modis_converted")
+    return h.assign(lo=np.where(conv, np.minimum(h.lo, h.fire_cell_days * lo), h.lo),
+                    hi=np.where(conv, np.maximum(h.hi, h.fire_cell_days * hi), h.hi))
 
 
 def _fill_missing_months(h: pd.DataFrame) -> pd.DataFrame:
@@ -156,10 +177,14 @@ def summary(h: pd.DataFrame) -> dict:
     complete = yearly[yearly.n == 12]
     py = complete.v.idxmax() if len(complete) else None
     seas = full.groupby("month")["fire_cell_days"].median()
-    trend = None
+    trend, t_stat = None, None
     if len(complete) >= 8 and complete.v.mean() > 0:
-        slope = np.polyfit(complete.index.to_numpy(float), complete.v.to_numpy(float), 1)[0]
+        x, y = complete.index.to_numpy(float), complete.v.to_numpy(float)
+        slope, icept = np.polyfit(x, y, 1)
+        resid = y - (slope * x + icept)
+        se = np.sqrt((resid ** 2).sum() / (len(x) - 2) / ((x - x.mean()) ** 2).sum())
         trend = round(float(100 * slope * 10 / complete.v.mean()), 1)
+        t_stat = round(float(slope / se), 2) if se > 0 else None
     an = h[h.anomaly.notna() & (h.fire_cell_days >= 5)].nlargest(5, "anomaly")
     return {
         "total": round(float(h.fire_cell_days.sum()), 1),
@@ -167,6 +192,8 @@ def summary(h: pd.DataFrame) -> dict:
         "peak_year": None if py is None else {"year": int(py), "value": round(float(complete.v[py]), 1)},
         "typical_peak_month": int(seas.idxmax()) if len(seas) and seas.max() > 0 else None,
         "trend_per_decade_pct": trend,
+        "trend_t": t_stat,  # slope ÷ its standard error; |t| ≥ 2 ≈ significant at 5% (fire years vary a lot)
+        "trend_significant": bool(t_stat is not None and abs(t_stat) >= 2),
         "top_anomalies": [{"year": int(r.year), "month": int(r.month), "value": round(float(r.fire_cell_days), 1),
                            "anomaly": round(float(r.anomaly), 2)} for r in an.itertuples()],
     }
@@ -226,9 +253,23 @@ NRT_SOURCE = "VIIRS_NOAA20_NRT"  # S-NPP ended 2026-11-02; NOAA-20 is converted 
 NRT_CHUNK_DAYS = 5  # the FIRMS area API serves 1–5 days per call
 
 
-@functools.lru_cache(maxsize=256)
+_NRT_CACHE: dict = {}
+NRT_CACHE_SECONDS = 3600
+
+
 def _nrt_fetch(bbox: tuple[float, float, float, float], since: dt.date, until: dt.date, key: str):
-    """NOAA-20 NRT hotspots for [since, until] in 5-day calls. Returns (frame, last day actually covered)."""
+    """NOAA-20 NRT hotspots for [since, until] in 5-day calls. Returns (frame, last day actually covered).
+    Complete answers are cached for an hour; partial ones (FIRMS failed midway) are retried next time."""
+    hit = _NRT_CACHE.get((bbox, since, until))
+    if hit and time.time() - hit[0] < NRT_CACHE_SECONDS:
+        return hit[1]
+    out = _nrt_fetch_uncached(bbox, since, until, key)
+    if out[1] >= until:
+        _NRT_CACHE[(bbox, since, until)] = (time.time(), out)
+    return out
+
+
+def _nrt_fetch_uncached(bbox, since: dt.date, until: dt.date, key: str):
     from pipeline.firms import fetch_area
     parts, covered = [], since - dt.timedelta(days=1)
     d = since
