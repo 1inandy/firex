@@ -265,3 +265,27 @@ def test_outages_are_excluded_from_fits_and_filled_in_the_record():
     obs.loc[(obs.family == "NOAA20"), "frac"] = 0.0  # no NOAA-20 to swap in: scale S-NPP by the days observed
     h = harmonize(monthly[monthly.family != "NOAA20"], fit_monthly_ratio(monthly, obs=obs), obs=obs)
     assert h.set_index(["year", "month"]).loc[(2024, 11), "fire_cell_days"] == pytest.approx(20)
+
+
+def test_api_fetch_chunks_by_five_days_and_fails_loudly(monkeypatch):
+    from pipeline import fetch
+
+    calls = []
+
+    class Reply:
+        def __init__(self, text): self.text = text
+        def raise_for_status(self): pass
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        if "BROKEN" in url:
+            return Reply("Invalid source")
+        day = url.rsplit("/", 1)[1]
+        return Reply(f"latitude,longitude,acq_date,acq_time,satellite,confidence,frp,daynight\n1,2,{day},0130,N20,n,3.0,D\n")
+
+    monkeypatch.setattr(fetch.requests, "get", fake_get)
+    df = fetch.fetch_api_range("VIIRS_NOAA20_NRT", (0, 0, 1, 1), dt.date(2026, 11, 1), dt.date(2026, 11, 12), "k")
+    assert [u.rsplit("/", 2)[1:] for u in calls] == [["5", "2026-11-01"], ["5", "2026-11-06"], ["2", "2026-11-11"]]
+    assert len(df) == 3 and df.acq_time.tolist() == ["0130"] * 3
+    with pytest.raises(RuntimeError):
+        fetch.fetch_api_range("BROKEN", (0, 0, 1, 1), dt.date(2026, 11, 1), dt.date(2026, 11, 2), "k")

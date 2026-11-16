@@ -19,7 +19,7 @@ from .harmonize import calibrate_bands, fit_regional_ratios, validate
 
 
 PRODUCT_FAMILY = {"modis": "MODIS", "viirs-snpp": "VIIRS", "viirs-jpss1": "NOAA20",
-                  "VIIRS_SNPP_NRT": "VIIRS", "VIIRS_SNPP_SP": "VIIRS",
+                  "VIIRS_SNPP_NRT": "VIIRS", "VIIRS_SNPP_SP": "VIIRS", "MODIS_SP": "MODIS", "MODIS_NRT": "MODIS",
                   "VIIRS_NOAA20_NRT": "NOAA20", "VIIRS_NOAA20_SP": "NOAA20"}
 
 
