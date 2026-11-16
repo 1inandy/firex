@@ -1,9 +1,13 @@
 import {
   MONTHS, MONTHS_LONG, viridis, countT, fmt, fmtRatio, niceTicks,
   calendarSVG, cellLabel, seasonalitySVG, validationSVG, svgToPng, calValue, OVERLAP_START,
+  RAW_NAMES, sourceNote, rawNote,
 } from "./charts.js";
 
-const API = (new URLSearchParams(location.search).get("api") || "http://localhost:8000").replace(/\/$/, "");
+// ?api= wins. Local dev (frontend served on its own port) talks to the API on :8000; everywhere else
+// the API is mounted same-origin under /api (production).
+const LOCAL_DEV = ["localhost", "127.0.0.1"].includes(location.hostname) && location.port !== "8000";
+const API = (new URLSearchParams(location.search).get("api") || (LOCAL_DEV ? "http://localhost:8000" : `${location.origin}/api`)).replace(/\/$/, "");
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
@@ -56,25 +60,6 @@ async function getJSON(path, params, signal, retries = 1) {
     const err = new Error(msg); err.status = r.status; throw err;
   }
   return r.json();
-}
-
-async function sendJSON(method, path, body) {
-  let r;
-  try {
-    r = await fetch(apiUrl(path), { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
-  } catch {
-    throw new Error(`Can't reach the API at ${API}.`);
-  }
-  if (!r.ok) {
-    let msg = `HTTP ${r.status}`;
-    try {
-      const j = await r.json();
-      if (typeof j.detail === "string") msg = j.detail;
-      else if (Array.isArray(j.detail)) msg = j.detail.map((d) => `${(d.loc || []).slice(-1)[0] || "field"}: ${d.msg}`).join("; ");
-    } catch {}
-    const err = new Error(msg); err.status = r.status; throw err;
-  }
-  return r.status === 204 ? null : r.json();
 }
 
 // ───────────────────────── card states ─────────────────────────
@@ -155,6 +140,8 @@ function parseAreaQuery(q) {
   if (bbox && !bboxError(bbox)) return { kind: "bbox", bbox };
   return null;
 }
+/** Ratio with two decimals when close to 1 (fmtRatio would round 1.04× to 1.0×). */
+const fmtX = (r) => (r < 2 ? `${r.toFixed(2)}×` : fmtRatio(r));
 const AREA_NAMES = { bbox: "Rectangle", poly: "Polygon", circle: "Circle" };
 
 // ───────────────────────── map ─────────────────────────
@@ -215,10 +202,10 @@ function renderMapLegend(max) {
   const ticks = niceTicks(max, 3).filter((v, i, a) => i === 0 || countT(v, max) - countT(a[i - 1], max) > 0.3);
   legendDiv.innerHTML = "";
   legendDiv.append(
-    el("div", { text: "Fire cell-days per 0.05° cell" }),
-    el("div", { class: "bar", style: `background:linear-gradient(90deg,${stops})`, role: "img", "aria-label": `Color scale from 0 to ${fmt(max, 0)} fire cell-days, square-root` }),
+    el("div", { text: "Harmonized fire cell-days per 0.05° cell" }),
+    el("div", { class: "bar", style: `background:linear-gradient(90deg,${stops})`, role: "img", "aria-label": `Color scale from 0 to ${fmt(max)} harmonized fire cell-days, square-root` }),
     el("div", { class: "ticks", style: "position:relative;height:12px;display:block" },
-      ticks.map((v) => el("span", { style: `position:absolute;left:${countT(v, max) * 100}%;transform:translateX(-50%)`, text: fmt(v, 0) })),
+      ticks.map((v) => el("span", { style: `position:absolute;left:${countT(v, max) * 100}%;transform:translateX(-50%)`, text: fmt(v) })),
     ),
   );
   legendDiv.hidden = !$("#cells-toggle").checked;
@@ -372,8 +359,8 @@ function updateDownloads(params) {
 function renderCurrent(d) {
   const b = body("card-current");
   if (!d || d.value == null) return setEmpty("card-current", "No current-month data for this area.");
-  $("#current-source").textContent = d.source === "nrt" ? "Live NRT" : d.source === "archive" ? "Archive" : "";
-  $("#current-source").classList.toggle("live", d.source === "nrt");
+  $("#current-source").textContent = d.live ? "Live · NOAA-20 NRT" : "Archive";
+  $("#current-source").classList.toggle("live", !!d.live);
   const mName = MONTHS_LONG[d.month - 1];
   const kids = [
     el("div", { class: "cur-head", text: `${mName} ${d.year}${d.partial ? ` · first ${d.days_covered ?? "?"} days` : ""}` }),
@@ -407,6 +394,7 @@ function renderCurrent(d) {
     kids.push(el("div", { class: "ratio-ticks", "aria-hidden": "true" }, ["¼×", "½×", "1× median", "2×", "4×+"].map((t) => el("span", { text: t }))));
   }
   if (d.partial) kids.push(el("div", { class: "note", text: `Month in progress: ${d.days_covered ?? "some"} days of data so far, compared with days 1–${d.days_covered ?? "?"} of ${mName} in past years. The total will rise as the month continues.` }));
+  if (d.note) kids.push(el("div", { class: "note", text: d.note }));
   b.replaceChildren(...kids);
 }
 
@@ -414,24 +402,24 @@ function renderPrecedent(d) {
   const mName = MONTHS_LONG[(d.month || 1) - 1];
   if (!d.n_events) return setEmpty("card-precedent", `No fire events starting in ${mName} on record in this area.`);
   const kids = [
-    el("p", {}, `In this area, fires starting in ${mName} historically burned a median of `,
+    el("p", {}, `In this area, fire events starting in ${mName} were detected over a median of `,
       el("strong", { text: `${fmt(d.median_duration_days, 0)} day${d.median_duration_days === 1 ? "" : "s"}` }),
-      d.p90_duration_days != null ? ` (1 in 10 lasted ${fmt(d.p90_duration_days, 0)}+ days)` : "", "."),
+      d.p90_duration_days != null ? ` (1 in 10 over ${fmt(d.p90_duration_days, 0)}+ days)` : "", "."),
   ];
   const lg = d.largest;
   if (lg) {
     const yr = (lg.start || "").slice(0, 4);
-    kids.push(el("p", {}, "The largest was ", el("strong", { text: `${fmt(lg.area_km2, 0)} km²` }),
-      lg.duration_days != null ? ` over ${fmt(lg.duration_days, 0)} days` : "", yr ? ` (${yr})` : "", "."));
+    kids.push(el("p", {}, "The most persistent had a detection footprint of ", el("strong", { text: `${fmt(lg.area_km2, 0)} km²` }),
+      lg.duration_days != null ? `, detected over ${fmt(lg.duration_days, 0)} days` : "", yr ? ` (${yr})` : "", "."));
   }
   const dl = el("dl", { class: "kv" },
     el("dt", { text: "Events on record" }), el("dd", { text: fmt(d.n_events, 0) }),
-    el("dt", { text: "Median area" }), el("dd", { text: d.median_area_km2 != null ? `${fmt(d.median_area_km2)} km²` : "–" }),
-    lg?.start ? [el("dt", { text: "Largest started" }), el("dd", { text: lg.start })] : null,
-    lg?.peak_frp != null ? [el("dt", { text: "Largest peak FRP" }), el("dd", { text: `${fmt(lg.peak_frp, 0)} MW` })] : null,
+    el("dt", { text: "Median detection footprint" }), el("dd", { text: d.median_area_km2 != null ? `${fmt(d.median_area_km2)} km²` : "–" }),
+    lg?.start ? [el("dt", { text: "Most persistent started" }), el("dd", { text: lg.start })] : null,
+    lg?.peak_frp != null ? [el("dt", { text: "Its peak FRP" }), el("dd", { text: `${fmt(lg.peak_frp, 0)} MW` })] : null,
   );
   kids.push(dl);
-  if (lg?.bbox) kids.push(el("button", { type: "button", class: "btn btn-ghost btn-sm", style: "margin-top:8px", onclick: () => showEvent(lg), text: "Show largest on map" }));
+  if (lg?.bbox) kids.push(el("button", { type: "button", class: "btn btn-ghost btn-sm", style: "margin-top:8px", onclick: () => showEvent(lg), text: "Show it on the map" }));
   body("card-precedent").replaceChildren(el("div", { class: "prec" }, kids));
 }
 
@@ -444,7 +432,7 @@ function renderCalendar() {
     body("card-calendar").append(el("div", { id: "cal-tip", class: "tip", hidden: true }));
     return;
   }
-  const { svg, years, by } = calendarSVG(d, state.calMode, state.coverage);
+  const { svg, years, by } = calendarSVG(d, state.calMode, state.coverage, state.health);
   const host = el("div", { id: "calendar" });
   host.innerHTML = svg;
   const tip = el("div", { id: "cal-tip", class: "tip", role: "tooltip", hidden: true });
@@ -456,20 +444,24 @@ function renderCalendar() {
 
 function renderHandoff(h) {
   const box = $("#handoff");
-  if (!h) { box.hidden = true; return; }
+  if (!h || h.viirs_per_modis == null) { box.hidden = true; return; }
   const span = (a) => `${a[0]}–${a[1]}`;
   const raw = state.calMode === "raw";
   box.hidden = false;
   box.classList.toggle("on", raw);
-  box.replaceChildren(
+  const kids = [
     el("strong", { text: "Sensor handoff check. " }),
-    `Stitching the raw sensors together, ${span(h.after_years)} averages `,
-    el("strong", { class: "accent", text: fmtRatio(h.raw_jump) }),
-    ` the ${span(h.before_years)} level: that jump is MODIS → VIIRS, not more fire. Harmonized, it is `,
-    el("strong", { text: fmtRatio(h.harmonized_jump) }), ".",
-    raw ? "" : " ",
-    raw ? "" : el("button", { type: "button", class: "linkish", onclick: () => setCalMode("raw"), text: "Show raw sensors" }),
-  );
+    `In the same months (${span(h.overlap_years)}) VIIRS logged `,
+    el("strong", { class: "accent", text: fmtX(h.viirs_per_modis) }),
+    " as many fire cell-days as MODIS over this area: that is the sensor difference, not more fire.",
+  ];
+  if (h.raw_jump != null && h.harmonized_jump != null && h.before_years && h.after_years) {
+    kids.push(` Stitched together raw, the record jumps `, el("strong", { text: fmtX(h.raw_jump) }),
+      ` at ${h.after_years[0]} (${span(h.after_years)} vs. ${span(h.before_years)}); harmonized, `,
+      el("strong", { text: fmtX(h.harmonized_jump) }), ". Real year-to-year change is part of both numbers.");
+  }
+  if (!raw) kids.push(" ", el("button", { type: "button", class: "linkish", onclick: () => setCalMode("raw"), text: "Show raw sensors" }));
+  box.replaceChildren(...kids);
 }
 
 function setCalMode(m) {
@@ -496,9 +488,9 @@ function wireCalendar(host, tip, by, years) {
         el("div", {}, el("b", { text: `${MONTHS_LONG[m - 1]} ${y}` })),
         rec && rec.raw != null
           ? [
-            el("div", {}, el("b", { text: fmt(rec.raw) }), ` raw ${rec.raw_source === "modis" ? "MODIS" : "VIIRS"} cell-days${rec.partial ? " so far" : ""}`),
+            el("div", {}, el("b", { text: fmt(rec.raw) }), ` raw ${RAW_NAMES[rec.raw_source] || rec.raw_source} cell-days${rec.partial ? " so far" : ""}`),
             el("div", { class: "t-muted", text: `Harmonized: ${fmt(rec.value)}` }),
-            el("div", { class: "t-muted", text: rec.raw_source === "modis" ? "Not converted: MODIS sees fewer, larger pixels" : "VIIRS measured" }),
+            el("div", { class: "t-muted", text: rawNote(rec, y, m, state.health) }),
           ]
           : el("div", { class: "t-muted", text: "No data" }),
       ].flat().filter(Boolean));
@@ -509,9 +501,7 @@ function wireCalendar(host, tip, by, years) {
           el("div", {}, el("b", { text: fmt(rec.value) }), rec.partial ? " fire cell-days so far" : " fire cell-days"),
           rec.partial ? el("div", { class: "t-warn", text: "Partial: month in progress, anomaly is provisional" }) : null,
           el("div", { class: "t-muted", text: rec.anomaly != null ? `${fmtRatio(rec.anomaly)} the ${MONTHS[m - 1]} median (${fmt(med)})${rec.partial ? ", provisional" : ""}` : `${MONTHS[m - 1]} median: ${fmt(med)}` }),
-          rec.source === "modis_converted"
-            ? el("div", { class: "t-muted", text: `MODIS converted · 10–90% band ${fmt(rec.lo)}–${fmt(rec.hi)}` })
-            : el("div", { class: "t-muted", text: "VIIRS measured" }),
+          el("div", { class: "t-muted", text: sourceNote(rec, y, m, state.health) }),
         ]
         : el("div", { class: "t-muted", text: "No data" }),
     ].flat().filter(Boolean));
@@ -568,16 +558,18 @@ function renderCalTable(d, years, by) {
     const v = state.calMode === "anomaly" ? (r.anomaly != null ? fmtRatio(r.anomaly) : "n/a") : fmt(calValue(r, state.calMode));
     return r.partial ? `${v}†` : v;
   };
-  const caption = raw ? `Raw fire cell-days, not harmonized: MODIS before ${OVERLAP_START} (* rows), VIIRS after. † = month in progress (so far).`
+  const n20 = d.months.some((r) => r.source === "noaa20_converted");
+  const n20Note = n20 ? ` Months after ${state.health?.snpp_end || "the end of Suomi NPP"}: NOAA-20 ${raw ? "VIIRS" : "converted to Suomi NPP units"}.` : "";
+  const caption = (raw ? `Raw fire cell-days, not harmonized: MODIS before ${OVERLAP_START} (* rows), VIIRS after. † = month in progress (so far).`
     : state.calMode === "anomaly" ? "Value ÷ monthly median. * = MODIS converted to VIIRS-equivalent. † = month in progress (provisional)."
-    : "Fire cell-days per month. * = MODIS converted to VIIRS-equivalent. † = month in progress (so far).";
+    : "Fire cell-days per month. * = MODIS converted to VIIRS-equivalent. † = month in progress (so far).") + n20Note;
   const t = el("table", { class: "data" },
     el("caption", { text: caption }),
     el("thead", {}, el("tr", {}, el("th", { scope: "col", text: "Year" }), MONTHS.map((m) => el("th", { scope: "col", text: m })))),
     el("tbody", {}, years.map((y) => {
       const conv = d.months.some((r) => r.year === y && r.source === "modis_converted");
       return el("tr", {}, el("th", { scope: "row", text: `${y}${conv ? "*" : ""}` }),
-        Array.from({ length: 12 }, (_, i) => el("td", { title: cellLabel(y, i + 1, by.get(`${y}-${i + 1}`), d, state.calMode), text: valueOf(y, i + 1) })));
+        Array.from({ length: 12 }, (_, i) => el("td", { title: cellLabel(y, i + 1, by.get(`${y}-${i + 1}`), d, state.calMode, state.health), text: valueOf(y, i + 1) })));
     })),
   );
   $("#cal-table").replaceChildren(t);
@@ -640,7 +632,7 @@ function renderCells(d) {
   for (const c of cells) {
     L.circleMarker([c.lat, c.lon], {
       radius: r, stroke: false, fillColor: viridis(mapT(c.cell_days, max)), fillOpacity: 0.9,
-    }).bindTooltip(`${fmt(c.cell_days, 0)} fire cell-days<br><span style="color:#8b95a1">${c.lat.toFixed(3)}, ${c.lon.toFixed(3)}</span>`, { direction: "top" })
+    }).bindTooltip(`${fmt(c.cell_days)} harmonized fire cell-days<br><span style="color:#8b95a1">${c.lat.toFixed(3)}, ${c.lon.toFixed(3)}</span>`, { direction: "top" })
       .addTo(cellsLayer);
   }
   renderMapLegend(max);
@@ -653,10 +645,10 @@ function renderEvents(d) {
   $("#events-count").textContent = evs.length ? `${evs.length} shown` : "";
   if (!evs.length) return setEmpty("card-events", "No fire events in this area and date range.");
   const list = el("div", { class: "events", role: "list" },
-    el("div", { class: "events-head", "aria-hidden": "true" }, ["Start", "Days", "Area km²", "Peak FRP", "Cell-days"].map((t) => el("span", { text: t }))),
+    el("div", { class: "events-head", "aria-hidden": "true" }, ["Start", "Days", "Footprint km²", "Peak FRP", "Cell-days"].map((t) => el("span", { text: t }))),
     evs.slice(0, 15).map((ev) => el("div", { role: "listitem" }, el("button", {
       type: "button", class: "event", "aria-pressed": "false",
-      "aria-label": `Fire starting ${ev.start}, ${ev.duration_days} days, ${fmt(ev.area_km2)} square kilometres, peak FRP ${fmt(ev.peak_frp, 0)} megawatts. Show on map.`,
+      "aria-label": `Fire event first detected ${ev.start}, detected over ${ev.duration_days} days, ${fmt(ev.cell_days, 0)} fire cell-days, detection footprint ${fmt(ev.area_km2)} square kilometres, peak FRP ${fmt(ev.peak_frp, 0)} megawatts. Show on map.`,
       onclick: (e) => {
         document.querySelectorAll(".event").forEach((b) => b.setAttribute("aria-pressed", "false"));
         e.currentTarget.setAttribute("aria-pressed", "true");
@@ -673,7 +665,7 @@ function showEvent(ev) {
   const b = ev.bbox;
   if (!b) return;
   const rect = L.rectangle([[b[1], b[0]], [b[3], b[2]]], { color: "#ffffff", weight: 2, fillColor: ACCENT, fillOpacity: 0.12 })
-    .bindTooltip(`Fire from ${ev.start} to ${ev.end || "?"} · ${fmt(ev.duration_days, 0)} days · ${fmt(ev.area_km2, 0)} km²`, { permanent: false })
+    .bindTooltip(`Detections from ${ev.start} to ${ev.end || "?"} · over ${fmt(ev.duration_days, 0)} days · footprint ${fmt(ev.area_km2, 0)} km²`, { permanent: false })
     .addTo(eventLayer);
   map.flyToBounds(rect.getBounds(), { padding: [40, 40], maxZoom: 11, duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 0.8 });
 }
@@ -687,13 +679,7 @@ $("#brief-btn").addEventListener("click", async () => {
   try {
     const d = await getJSON("/brief", areaParams());
     if (gen !== state.gen) return;
-    const kids = [el("p", { class: "brief-text", text: d.text || "(empty briefing)" })];
-    kids.push(d.verified
-      ? el("span", { class: "badge ok" }, "✓ Verified against computed numbers")
-      : el("span", { class: "badge warn" }, "! Some numbers could not be verified"));
-    if (d.model) kids.push(el("span", { class: "small muted", style: "margin-left:8px", text: d.model === "template" ? "template briefing" : `model: ${d.model}` }));
-    if (d.unverified_numbers?.length) kids.push(el("div", { class: "unverified", text: `Unverified numbers: ${d.unverified_numbers.join(", ")}` }));
-    body("card-brief").replaceChildren(...kids);
+    body("card-brief").replaceChildren(el("p", { class: "brief-text", text: d.text || "(empty briefing)" }));
   } catch (e) {
     if (gen === state.gen) setError("card-brief", e);
   } finally {
@@ -725,128 +711,113 @@ async function loadValidation(bbox) {
     if (validationKey !== key) return;
     const kids = [];
     const mName = METHOD_NAMES[v.method] || v.method;
-    if (v.region_name) kids.push(el("div", { class: "small muted", text: `Validation region: ${v.region_name}${bbox ? " (contains your area’s centre)" : ""}` }));
-    if (v.annual_abs_error_pct != null) {
-      kids.push(el("p", { class: "headline" }, "Harmonized MODIS predicts real VIIRS annual totals within ",
-        el("span", { class: "accent", text: `${fmt(v.annual_abs_error_pct, 1)}%` }), " on average."));
-    }
     const bl = v.baseline;
-    if (bl?.annual_abs_error_pct != null && v.annual_abs_error_pct != null) {
-      kids.push(el("p", { class: "compare" }, "Our method", mName ? ` (${mName})` : "", ": ",
-        el("strong", { text: `${fmt(v.annual_abs_error_pct, 1)}%` }), " annual error vs. ",
-        el("strong", { text: `${fmt(bl.annual_abs_error_pct, 1)}%` }), ` for a ${METHOD_NAMES[bl.method] || bl.method}.`));
-    }
-    const row = (label, ours, base, f) => [el("dt", { text: label }),
-      el("dd", { text: ours == null ? "–" : f(ours) + (base != null ? `   (ratio baseline ${f(base)})` : "") })];
-    kids.push(el("dl", { class: "kv" },
-      v.train_years ? [el("dt", { text: "Ratios fit on" }), el("dd", { text: `${v.train_years[0]}–${v.train_years[1]}` })] : null,
-      v.test_years ? [el("dt", { text: "Tested on (held out)" }), el("dd", { text: `${v.test_years[0]}–${v.test_years[1]}` })] : null,
-      v.mape_monthly_pct != null ? row("Monthly error (MAPE)", v.mape_monthly_pct, bl?.mape_monthly_pct, (x) => `${fmt(x, 1)}%`) : null,
-      v.r2 != null ? row("R² (monthly)", v.r2, bl?.r2, (x) => x.toFixed(2)) : null,
+    const span = (a) => `${a[0]}–${a[1]}`;
+    const pct = (x) => (x == null ? "–" : `${fmt(x, 1)}%`);
+    const signed = (x) => (x == null ? "–" : `${x > 0 ? "+" : x < 0 ? "−" : ""}${fmt(Math.abs(x), 1)}%`);
+    const h = (t) => el("h3", { class: "val-h", text: t });
+    const p = (...c) => el("p", { class: "val-p" }, ...c);
+    const yearTable = (caption, rows, predLabel) => el("div", { class: "table-scroll" }, el("table", { class: "data methods" },
+      el("caption", { text: caption }),
+      el("thead", {}, el("tr", {}, ["Year", predLabel, "Observed", "Error"].map((t) => el("th", { scope: "col", text: t })))),
+      el("tbody", {}, rows.map((r) => el("tr", {},
+        el("th", { scope: "row", text: `${r.year}${r.modis_drift?.length ? ` (${r.modis_drift.join(" + ")} drifting)` : ""}` }),
+        el("td", { text: fmt(r.predicted, 0) }), el("td", { text: fmt(r.observed, 0) }), el("td", { text: signed(r.error_pct) })))),
     ));
-    if (v.methods?.length > 1) {
-      const best = Math.min(...v.methods.map((m) => m.annual_abs_error_pct ?? Infinity));
-      const pct = (x) => (x == null ? "–" : `${fmt(x, 1)}%`);
-      kids.push(el("table", { class: "data methods" },
-        el("caption", { text: "Every method, fit on the same training years and scored on the same held-out years" }),
+    const methodTable = (caption, methods) => {
+      const best = Math.min(...methods.map((m) => m.annual_abs_error_pct ?? Infinity));
+      return el("div", { class: "table-scroll" }, el("table", { class: "data methods" },
+        el("caption", { text: caption }),
         el("thead", {}, el("tr", {}, ["Method", "Annual error", "Monthly MAPE", "R²"].map((t) => el("th", { scope: "col", text: t })))),
-        el("tbody", {}, v.methods.map((m) => el("tr", { class: m.method === v.method ? "active" : null },
+        el("tbody", {}, methods.map((m) => el("tr", { class: m.method === v.method ? "active" : null },
           el("th", { scope: "row" }, METHOD_NAMES[m.method] || m.method, m.method === v.method ? el("span", { class: "pill", text: "in use" }) : null),
           el("td", { class: m.annual_abs_error_pct === best ? "best" : null, text: pct(m.annual_abs_error_pct) }),
           el("td", { text: pct(m.mape_monthly_pct) }),
           el("td", { text: m.r2 == null ? "–" : m.r2.toFixed(2) }),
         ))),
       ));
+    };
+
+    if (v.region_name) kids.push(el("div", { class: "small muted", text: `Validation region: ${v.region_name}${bbox ? " (contains your area’s centre)" : ""}` }));
+
+    // 1. headline: leave-one-year-out vs. the ratio baseline
+    if (v.annual_abs_error_pct != null) {
+      kids.push(el("p", { class: "headline" }, "Held-out years: converted MODIS lands within ",
+        el("span", { class: "accent", text: pct(v.annual_abs_error_pct) }), " of the real VIIRS annual total on average",
+        bl?.annual_abs_error_pct != null ? ` (${METHOD_NAMES[bl.method] || bl.method}: ${pct(bl.annual_abs_error_pct)})` : "", "."));
     }
+    if (v.test_years) {
+      kids.push(p(`Leave-one-year-out: each year in ${span(v.test_years)} is held out in turn, the conversion${mName ? ` (${mName})` : ""} is fit on the other years, and the held-out year’s MODIS is converted and compared with what VIIRS actually measured. `,
+        "These years come before the MODIS orbit drift, like the MODIS-only record the conversion is applied to."));
+    }
+    const row = (label, ours, base, f) => [el("dt", { text: label }),
+      el("dd", { text: ours == null ? "–" : f(ours) + (base != null ? `   (ratio baseline ${f(base)})` : "") })];
+    kids.push(el("dl", { class: "kv" },
+      v.train_years ? [el("dt", { text: "Fit window" }), el("dd", { text: span(v.train_years) })] : null,
+      v.test_years ? [el("dt", { text: "Tested on" }), el("dd", { text: `${span(v.test_years)}, each year held out in turn` })] : null,
+      v.annual_abs_error_pct != null ? row("Annual error (mean abs.)", v.annual_abs_error_pct, bl?.annual_abs_error_pct, pct) : null,
+      v.mape_monthly_pct != null ? row("Monthly error (MAPE)", v.mape_monthly_pct, bl?.mape_monthly_pct, pct) : null,
+      v.r2 != null ? row("R² (monthly)", v.r2, bl?.r2, (x) => x.toFixed(2)) : null,
+    ));
+    if (v.methods?.length > 1) kids.push(methodTable("Every method, scored the same leave-one-year-out way", v.methods));
     if (v.annual?.length) {
       const c = el("div", { style: "margin-top:10px" });
       c.innerHTML = validationSVG(v.annual);
       kids.push(c);
     }
-    if (v.drift_from && v.annual?.some((r) => r.modis_drift?.length)) {
-      const sats = Object.entries(v.drift_from).map(([s, y]) => `${s} since ~${y}`).join(", ");
-      kids.push(el("p", { class: "note" }, el("strong", { text: "* MODIS orbit drift. " }),
-        `Terra and Aqua have been drifting to earlier overpass times (${sats}), so late-mission MODIS sees a cooler part of the daily fire cycle and fewer fires. `,
-        `The held-out years are drift years, which makes this test harder than the real use: the converted record (2001–${OVERLAP_START - 1}) predates the drift.`));
+
+    // 2. spatial holdout
+    const sp = v.spatial;
+    if (sp?.annual_abs_error_pct != null) {
+      kids.push(h("Does it work on areas it never saw?"));
+      kids.push(p(`Spatial holdout${sp.description ? ` (${sp.description})` : ""}: annual error `, el("strong", { text: pct(sp.annual_abs_error_pct) }),
+        `, monthly MAPE ${pct(sp.mape_monthly_pct)}`, sp.r2 != null ? `, R² ${sp.r2.toFixed(2)}` : "",
+        ". This matters because you draw your own area: the fit has to transfer to cells it was not trained on."));
+      if (sp.methods?.length > 1) kids.push(methodTable("Every method on the spatial holdout", sp.methods));
+    }
+
+    // 3. drift stress test
+    const dt = v.drift_test;
+    if (dt?.annual?.length) {
+      const sats = v.drift_from ? Object.entries(v.drift_from).map(([s, y]) => `${s} since ~${y}`).join(", ") : "";
+      kids.push(h(`Stress test: MODIS orbit drift (${span(dt.years)})`));
+      kids.push(p(`Terra and Aqua have been drifting to earlier overpass times${sats ? ` (${sats})` : ""}, so late-mission MODIS sees a cooler part of the daily fire cycle and fewer fires. `,
+        `Applying the ${v.train_years ? span(v.train_years) : "fit-window"} conversion to these later years gives an annual error of `, el("strong", { text: pct(dt.annual_abs_error_pct) }),
+        " and a mean bias of ", el("strong", { text: signed(dt.mean_bias_pct) }),
+        dt.mean_bias_pct < 0 ? " (converted MODIS comes out too low, the direction drift would push it)" : "",
+        `. The converted record (before ${OVERLAP_START}) predates the drift and these years are measured by VIIRS directly, so this bias is reported as a limit of MODIS, not applied as a correction.`));
+      kids.push(yearTable("Drift years: converted MODIS vs. measured VIIRS (fire cell-days per year)", dt.annual, "From MODIS"));
+    }
+
+    // 4. uncertainty band
+    if (v.band && v.band_coverage_pct != null) {
+      kids.push(h("Is the 10–90% band honest?"));
+      kids.push(p(`Converted months carry a band of ${v.band[0].toFixed(2)}× to ${v.band[1].toFixed(2)}× the estimate, set from the leave-one-year-out errors. Measured on the ${v.band_coverage_on || "held-out months"}, `,
+        el("strong", { text: pct(v.band_coverage_pct) }), " of months fell inside it. A perfectly calibrated 10–90% band would hold 80%",
+        v.band_coverage_pct < 80 ? ", so on those years it is somewhat too narrow." : "."));
+    }
+
+    // 5. NOAA-20 → S-NPP bridge
+    const nb = v.noaa20_bridge;
+    if (nb?.annual?.length) {
+      kids.push(h("NOAA-20 → Suomi NPP bridge"));
+      kids.push(p("Suomi NPP stopped delivering observations on 2 November 2026, so later months come from the VIIRS on NOAA-20, scaled to Suomi NPP units with a monthly factor. ",
+        `Checked on ${span(nb.years)}, when both satellites flew (each year held out in turn): annual error `, el("strong", { text: pct(nb.annual_abs_error_pct) }), "."));
+      kids.push(yearTable("Converted NOAA-20 vs. measured Suomi NPP (fire cell-days per year)", nb.annual, "From NOAA-20"));
+    }
+
+    // 6. Terra-only scaling
+    const ts = Object.values(v.terra_scale || {});
+    if (ts.length) {
+      const aqua = state.health?.aqua_first_month;
+      kids.push(p(el("strong", { text: "Terra-only months. " }),
+        `${aqua ? `Before ${aqua}` : "Before Aqua launched"} only Terra carried MODIS. Those months are first scaled up to Terra+Aqua by a monthly factor (${Math.min(...ts).toFixed(2)}× to ${Math.max(...ts).toFixed(2)}×) learned from years when both flew, then converted like the rest.`));
     }
     host.replaceChildren(...kids);
   } catch (e) {
     host.replaceChildren(el("div", { class: "state err", text: `Validation unavailable: ${e.message}` }));
   }
 }
-
-// ───────────────────────── alerts ─────────────────────────
-const alertForm = $("#alert-form");
-function alertLabel(a) {
-  if (a.name) return a.name;
-  const [k, v] = Object.entries(a.area || {})[0] || [];
-  if (k === "circle") { const [lon, lat, km] = v.split(","); return `${fmt(+km, 0)} km around ${lat}, ${lon}`; }
-  if (k === "poly") return `Polygon (${v.split(";").length} vertices)`;
-  return `Box ${v}`;
-}
-function alertStatus(st, threshold) {
-  if (!st) return el("span", { class: "badge warn", text: "Can't evaluate" });
-  const when = `${MONTHS[st.month - 1]} ${st.year}${st.partial ? " so far" : ""}`;
-  const r = st.ratio != null ? `${fmtRatio(st.ratio)} median` : st.value > 0 ? "fire, median 0" : "no fire";
-  return st.triggered
-    ? el("span", { class: "badge hot", text: `Triggered: ${r} · ${when}` })
-    : el("span", { class: "badge ok", text: `Below ${fmtRatio(threshold)}: ${r} · ${when}` });
-}
-function renderAlerts(list, notified = {}) {
-  const host = body("card-alerts");
-  if (!list.length) return host.replaceChildren(el("div", { class: "state", text: "No alerts yet. Pick an area, then subscribe above." }));
-  host.replaceChildren(el("ul", { class: "alerts" }, list.map((a) => el("li", {},
-    el("div", { class: "alert-main" },
-      el("strong", { text: alertLabel(a) }),
-      el("span", { class: "small muted", text: ` · at ${fmtRatio(a.threshold)} median${a.email ? ` · ${a.email}` : ""}${a.webhook ? " · webhook" : ""}${!a.email && !a.webhook ? " · in-app only" : ""}` }),
-    ),
-    el("div", { class: "alert-status" }, alertStatus(a.status, a.threshold),
-      notified[a.id]?.length ? el("span", { class: "small muted", text: ` Notified: ${notified[a.id].join(", ")}` }) : null),
-    el("div", { class: "alert-actions" },
-      el("button", { type: "button", class: "btn btn-ghost btn-sm", text: "Show", onclick: () => { const ar = parseAreaQuery(new URLSearchParams(a.area)); if (ar) { setArea(ar); analyze(); } } }),
-      el("button", { type: "button", class: "btn btn-ghost btn-sm", "aria-label": `Delete alert ${alertLabel(a)}`, text: "Delete",
-        onclick: async (e) => { e.currentTarget.disabled = true; try { await sendJSON("DELETE", `/alerts/${a.id}`); } catch (err) { $("#alert-error").textContent = err.message; } loadAlerts(); } }),
-    ),
-  ))));
-}
-async function loadAlerts() {
-  if (!state.health?.data_ready) return setEmpty("card-alerts", "Alerts need harmonized data.");
-  setLoading("card-alerts");
-  try { renderAlerts((await getJSON("/alerts")).alerts || []); } catch (e) { setError("card-alerts", e); }
-}
-alertForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  $("#alert-error").textContent = "";
-  if (!state.area) { $("#alert-error").textContent = "Pick an area first."; return; }
-  const btn = alertForm.querySelector("button[type=submit]");
-  btn.disabled = true;
-  try {
-    await sendJSON("POST", "/alerts", {
-      ...areaParams(), threshold: parseFloat($("#a-threshold").value),
-      name: $("#a-name").value.trim() || null, email: $("#a-email").value.trim() || null, webhook: $("#a-webhook").value.trim() || null,
-    });
-    alertForm.reset();
-    loadAlerts();
-  } catch (err) {
-    $("#alert-error").textContent = err.message;
-  } finally {
-    btn.disabled = false;
-  }
-});
-$("#alerts-check").addEventListener("click", async (e) => {
-  const btn = e.currentTarget;
-  btn.disabled = true;
-  setLoading("card-alerts", "Checking…");
-  try {
-    const res = (await sendJSON("POST", "/alerts/check")).results || [];
-    const notified = Object.fromEntries(res.map((r) => [r.alert.id, r.notified || []]));
-    renderAlerts(res.map((r) => ({ ...r.alert, status: r.status ?? null })), notified);
-  } catch (err) {
-    setError("card-alerts", err);
-  } finally {
-    btn.disabled = false;
-  }
-});
 
 // ───────────────────────── boot ─────────────────────────
 function showBanner(html, err = false) {
@@ -901,7 +872,7 @@ async function boot() {
 
   if (health.method === "ratio") {
     const p = document.querySelector("#how-ratio");
-    if (p) p.innerHTML = "<strong>Learn the conversion.</strong> On the overlap years (2012 onward) we fit a VIIRS ÷ MODIS ratio for each calendar month, with a 10–90% band.";
+    if (p) p.innerHTML = "<strong>Learn the conversion.</strong> On the overlap years (2012–2019) we fit a VIIRS ÷ MODIS ratio for each calendar month, with a 10–90% band.";
   }
   if (!health.data_ready) {
     showBanner(`No harmonized data yet. Build it, then reload: <code>python -m pipeline.run data/raw/&lt;region&gt;</code> (or a demo: <code>python -m pipeline.demo &amp;&amp; python -m pipeline.run data/raw/demo</code>).`, true);
@@ -910,7 +881,6 @@ async function boot() {
   }
 
   loadRegions();
-  loadAlerts();
   if (!urlArea) loadValidation();
   if (urlArea) {
     setArea(urlArea);

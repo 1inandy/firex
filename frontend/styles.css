@@ -228,10 +228,6 @@ table.data caption { text-align: left; color: var(--muted); padding-bottom: 4px;
 
 /* brief */
 .brief-text { white-space: pre-wrap; margin: 0 0 8px; font-size: 13.5px; line-height: 1.55; }
-.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 2px 8px; border-radius: 999px; border: 1px solid; }
-.badge.ok { color: var(--good); border-color: #2c5148; }
-.badge.warn { color: var(--warn); border-color: #5a4a24; }
-.unverified { font-size: 12px; color: var(--warn); margin-top: 6px; }
 
 .dl-row { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -279,14 +275,11 @@ table.data.methods tr.active th, table.data.methods tr.active td { color: var(--
 table.data.methods .pill { margin-left: 6px; }
 table.data.methods td.best { color: var(--good); font-weight: 600; }
 
-/* alerts */
-.alert-form { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-bottom: 8px; }
-.alert-form label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
-.alert-form select { background: var(--panel-2); color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; padding: 6px 8px; font: inherit; }
-@media (max-width: 900px) { .alert-form { grid-template-columns: 1fr 1fr; } }
-ul.alerts { list-style: none; margin: 0; padding: 0; }
-ul.alerts li { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
-ul.alerts li:first-child { border-top: 0; }
-.alert-status { grid-column: 1; }
-.alert-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; align-items: center; }
-.badge.hot { color: var(--accent); border-color: #6b4a22; }
+/* validation sub-sections */
+.val-h { font-size: 13px; font-weight: 600; margin: 16px 0 4px; }
+.val-p { font-size: 13px; color: #c7cdd5; margin: 0 0 6px; max-width: 680px; }
+.val-p strong { color: var(--text); }
+#validation .table-scroll { max-width: 680px; }
+#validation .kv dd { white-space: normal; }
+.how-text a, .val-p a { color: var(--accent); }
+.area-note { margin: 0; }
