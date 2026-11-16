@@ -101,7 +101,7 @@ def validation(region: str) -> str:
     x0, x1 = int(m.year.min()), int(m.year.max())
     out, _, sy = _frame(
         f"Harmonized MODIS predicts real VIIRS within {v['annual_abs_error_pct']}% a year",
-        f"Fit on {v['train_years'][0]}–{v['train_years'][1]}, tested on {v['test_years'][0]}–{v['test_years'][1]} "
+        f"Each year {v['test_years'][0]}–{v['test_years'][1]} predicted by a conversion fit on the other years "
         f"(never seen). Simple ratio baseline: {v['baseline']['annual_abs_error_pct']}%.",
         x0, x1, ymax, "fire cell-days per month", every=1)
     sx2 = _scale(x0, x1 + 1, PAD["l"], W - PAD["r"])
