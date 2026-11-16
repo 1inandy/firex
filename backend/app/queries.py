@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar as cal
 import datetime as dt
+import collections
 import time
 import json
 import os
@@ -128,16 +129,18 @@ def _small_area_band(h: pd.DataFrame, a: Area) -> pd.DataFrame:
     from .area import area_km2
     km2 = area_km2(a)
     try:
-        sa = {x["tile_deg"]: x["band"] for x in validation(a).get("small_area", [])}
+        sa = {x["tile_deg"]: (x["band"], x.get("band_add_per_tile", 0.0)) for x in validation(a).get("small_area", [])}
     except NoData:
         return h
     deg = next((d for d in sorted(SMALL_AREA_KM2) if km2 < SMALL_AREA_KM2[d] and d in sa), None)
     if deg is None or h.empty:
         return h
-    lo, hi = sa[deg]
+    (lo, hi), add = sa[deg]
+    lat = (a.bbox[1] + a.bbox[3]) / 2
+    tiles = km2 / ((deg * 111.32) ** 2 * max(np.cos(np.radians(lat)), 0.1))  # area in tile units
     conv = h.source.eq("modis_converted")
     return h.assign(lo=np.where(conv, np.minimum(h.lo, h.fire_cell_days * lo), h.lo),
-                    hi=np.where(conv, np.maximum(h.hi, h.fire_cell_days * hi), h.hi))
+                    hi=np.where(conv, np.maximum(h.hi, h.fire_cell_days * hi) + add * min(tiles, 1.0), h.hi))
 
 
 def _fill_missing_months(h: pd.DataFrame) -> pd.DataFrame:
@@ -253,8 +256,8 @@ NRT_SOURCE = "VIIRS_NOAA20_NRT"  # S-NPP ended 2026-11-02; NOAA-20 is converted 
 NRT_CHUNK_DAYS = 5  # the FIRMS area API serves 1–5 days per call
 
 
-_NRT_CACHE: dict = {}
-NRT_CACHE_SECONDS = 3600
+_NRT_CACHE: "collections.OrderedDict" = collections.OrderedDict()
+NRT_CACHE_SECONDS, NRT_CACHE_MAX = 3600, 64
 
 
 def _nrt_fetch(bbox: tuple[float, float, float, float], since: dt.date, until: dt.date, key: str):
@@ -265,7 +268,12 @@ def _nrt_fetch(bbox: tuple[float, float, float, float], since: dt.date, until: d
         return hit[1]
     out = _nrt_fetch_uncached(bbox, since, until, key)
     if out[1] >= until:
-        _NRT_CACHE[(bbox, since, until)] = (time.time(), out)
+        now = time.time()
+        for k in [k for k, (t, _) in _NRT_CACHE.items() if now - t >= NRT_CACHE_SECONDS]:
+            del _NRT_CACHE[k]
+        _NRT_CACHE[(bbox, since, until)] = (now, out)
+        while len(_NRT_CACHE) > NRT_CACHE_MAX:
+            _NRT_CACHE.popitem(last=False)
     return out
 
 
@@ -306,6 +314,32 @@ def _nrt_cell_days(a: Area, since: dt.date, until: dt.date) -> tuple[pd.DataFram
     return a.filter(g.assign(date=pd.to_datetime(g.date))), covered  # same dtype as the archive rows
 
 
+OBS_COVERAGE = {"MODIS": "MODIS", "TERRA": "MODIS", "AQUA": "MODIS", "VIIRS": "VIIRS", "NOAA20": "NOAA20"}
+
+
+def _window_obs(month: int, end_day: int, years) -> pd.DataFrame | None:
+    """Share of days 1..end_day of `month` that each sensor group observed, per year (coverage minus the
+    outages recorded by the pipeline). The same-days comparison then picks and fills sensors like the calendar."""
+    md = meta()
+    cov, gaps = md.get("coverage") or {}, md.get("outages") or {}
+    if not cov:
+        return None
+    rows = []
+    for y in years:
+        days = pd.date_range(dt.date(y, month, 1), periods=end_day, freq="D")
+        for g, ck in OBS_COVERAGE.items():
+            c = cov.get(ck)
+            if c is None:
+                continue
+            ok = (days >= pd.Timestamp(c[0])) & (days <= pd.Timestamp(c[1]))
+            if g == "AQUA":
+                ok &= days >= pd.Timestamp(dt.date(*config.AQUA_FIRST_MONTH, 4))
+            for lo, hi in gaps.get(g, []):
+                ok &= ~((days >= pd.Timestamp(lo)) & (days <= pd.Timestamp(hi)))
+            rows.append({"family": g, "year": y, "month": month, "frac": float(ok.mean())})
+    return pd.DataFrame(rows)
+
+
 def current(a: Area, today: dt.date | None = None) -> dict:
     """This month so far vs the same days of the same month in every past year.
 
@@ -337,20 +371,18 @@ def current(a: Area, today: dt.date | None = None) -> dict:
             "live": live, "source": "nrt" if live else "archive", "note": note}
     if g.empty:
         return {**base, "value": 0.0, "median": 0.0, "ratio": None, "highest_since": None, "rank": None, "n_years": 0}
+    start = pd.Timestamp(meta().get("min_date", "2001-01-01"))
+    first_year = start.year + int(month < start.month)  # the record starts Nov 2000: earlier months unobserved
     fam = cell_days_by_family(g)
     d = pd.to_datetime(fam.date)
     fam = fam.assign(year=d.dt.year, month=d.dt.month, strong=fam.frp_max >= config.STRONG_FRP_MW)
     per = fam.groupby(["cell_id", "year", "month", "family"], as_index=False).agg(
         fire_cell_days=("strong", "size"), strong_cell_days=("strong", "sum"))
-    obs = observed()
-    if obs is not None:  # in a days-1..N window, pick the sensor but don't rescale by whole-month outages
-        obs = obs.assign(frac=(obs.frac > 0).astype(float))
+    obs = _window_obs(month, end_day, range(first_year, year + 1))
     if live:  # the live month comes from NOAA-20 NRT
         lv = pd.DataFrame({"family": ["VIIRS", "NOAA20"], "year": year, "month": month, "frac": [0.0, 1.0]})
         obs = lv if obs is None else pd.concat([obs[~((obs.year == year) & (obs.month == month))], lv])
     h = harmonize(per, load_ratios(a), obs=obs)
-    start = pd.Timestamp(meta().get("min_date", "2001-01-01"))
-    first_year = start.year + int(month < start.month)  # the record starts Nov 2000: earlier months unobserved
     years = pd.DataFrame({"year": range(first_year, year + 1)})
     series = years.merge(h.groupby("year", as_index=False)["fire_cell_days"].sum(), on="year", how="left").fillna(0.0)
     series = series.set_index("year")["fire_cell_days"]
