@@ -7,37 +7,115 @@
   <meta name="description" content="25 years of MODIS and VIIRS fire hotspots merged into one harmonized record. Pick any area and see its burning calendar." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%23f0a04b%22/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body>
+<body class="no-area">
   <a class="skip" href="#analysis">Skip to analysis</a>
 
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-name">Plume</span>
-      <span class="brand-sub">Harmonized MODIS + VIIRS fire record, <span class="record-span">from Nov 2000</span></span>
-    </div>
-    <div class="topbar-meta" id="coverage" aria-live="polite"></div>
-  </header>
+  <!-- ───────────── Landing (shown on a plain visit; skipped when the URL carries an area) ───────────── -->
+  <div id="landing" class="landing" hidden>
+    <section class="lp-first" aria-labelledby="lp-title">
+      <div class="lp-cal" id="lp-cal" aria-hidden="true"></div>
+      <div class="lp-shade" aria-hidden="true"></div>
+      <div class="lp-grain" aria-hidden="true"></div>
+      <p class="lp-calnote" id="lp-calnote"></p>
+
+      <header class="lp-wrap lp-top">
+        <span class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Plume</span></span>
+        <div class="coverage" id="lp-coverage" aria-live="polite"></div>
+      </header>
+
+      <div class="lp-wrap lp-main">
+        <p class="badge lp-eyebrow">NASA Space Apps 2026 · MODIS × VIIRS harmonization</p>
+        <h1 class="lp-title" id="lp-title"><span>Every fire season</span><span>since 2000.</span><span class="lp-one">One record.</span></h1>
+        <p class="lp-sub">Plume fuses <strong>MODIS, VIIRS S-NPP and NOAA-20</strong> hotspots from NASA FIRMS into one burning calendar, so you can see when an area burns, which seasons were extreme, and how this month compares with every year since 2000.</p>
+        <div class="lp-cta">
+          <button type="button" class="lp-btn lp-btn-primary" id="lp-open">Open the map <span aria-hidden="true">→</span></button>
+          <a class="lp-btn" href="#lp-how" id="lp-how-link">How it works <span aria-hidden="true">↓</span></a>
+        </div>
+      </div>
+
+      <div class="lp-wrap">
+        <div class="glass lp-stats" id="lp-stats" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section class="lp-wrap lp-section" aria-labelledby="lp-tl-h">
+      <p class="badge">The challenge</p>
+      <h2 class="lp-h" id="lp-tl-h">Four satellites, two handoffs</h2>
+      <p class="lp-lead">No single instrument saw the whole period. MODIS is coarse (1 km) and its orbits have drifted; VIIRS is sharper (375 m) but only starts in 2012, and the Suomi NPP satellite it flies on stops in 2026. Stitched together raw, the record jumps at every handoff. Plume removes the jumps.</p>
+      <div class="glass lp-tl" id="lp-tl"></div>
+    </section>
+
+    <section class="lp-wrap lp-section" id="lp-how" aria-labelledby="lp-how-h" tabindex="-1">
+      <p class="badge">How it works</p>
+      <h2 class="lp-h" id="lp-how-h">From hotspots to a calendar you can read</h2>
+      <div class="lp-cards">
+        <article class="glass lp-card">
+          <span class="lp-card-n">01</span>
+          <h3>Harmonize</h3>
+          <p>On the years both sensors flew, we learn how many VIIRS fire cell-days each MODIS one is worth, month by month and by fire intensity, then convert the MODIS-only years. Every conversion is scored on years it never saw.</p>
+          <div class="lp-fact" id="lp-fact-1"></div>
+        </article>
+        <article class="glass lp-card warn">
+          <span class="lp-card-n">02</span>
+          <h3>Burning calendar</h3>
+          <p>Draw any area and get one cell per month, coloured by fire activity or by anomaly against that month’s median. Seasons, extremes and trends show at a glance.</p>
+          <div class="lp-fact" id="lp-fact-2"></div>
+        </article>
+        <article class="glass lp-card crit">
+          <span class="lp-card-n">03</span>
+          <h3>This month vs history</h3>
+          <p>The current month is ranked against the same month in every year on record, with the most persistent past fire events for precedent.</p>
+          <div class="lp-fact" id="lp-fact-3"></div>
+        </article>
+      </div>
+      <div class="lp-end">
+        <p class="small muted">Data: NASA FIRMS (MODIS C6.1; VIIRS 375 m on Suomi NPP and NOAA-20). Fire cell-days count 0.05° grid cells with at least one vegetation-fire detection on a day: where and for how long fire was detected, not area burned.</p>
+        <button type="button" class="lp-btn lp-btn-primary" id="lp-open-2">Open the map <span aria-hidden="true">→</span></button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // Decide before first paint: a URL that carries an area (or region) skips the landing page.
+    if (!/[?&](bbox|poly|circle|region)=/.test(location.search)) document.getElementById("landing").hidden = false;
+  </script>
+
+  <div id="app">
+  <div id="map" role="region" aria-label="Map. Draw a rectangle, polygon or circle to choose an area; coordinates can also be typed in the area card."></div>
 
   <div id="banner" class="banner" role="status" hidden></div>
 
-  <main class="layout">
-    <!-- ───────────── Left: area picker + map ───────────── -->
-    <section class="left" aria-label="Area and date range">
-      <form id="area-form" class="controls" novalidate>
-        <div class="ctrl-row">
-          <span class="ctrl-label" id="presets-label">Quick pick</span>
-          <div id="presets" class="chips" role="group" aria-labelledby="presets-label">
-            <span class="muted small">Loading regions…</span>
-          </div>
-        </div>
+  <!-- ───────────── Top-left: area card + this-month hero ───────────── -->
+  <div class="hud-left">
+    <section class="glass area-card" aria-label="Area and date range">
+      <div class="area-top">
+        <a class="brand" id="brand-home" href="./" aria-label="Plume: back to the start page">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Plume</span>
+        </a>
+        <div class="coverage" id="coverage" aria-live="polite"></div>
+      </div>
+      <h1 id="area-name" class="area-name">Pick an area</h1>
+      <p id="area-stats" class="area-stats" aria-live="polite">Harmonized fire record, <span class="record-span">from Nov 2000</span></p>
 
+      <div class="area-picks">
+        <span class="sr-only" id="presets-label">Quick pick</span>
+        <div id="presets" class="chips" role="group" aria-labelledby="presets-label">
+          <span class="muted small">Loading regions…</span>
+        </div>
+      </div>
+
+      <button type="button" class="area-toggle" id="area-toggle" aria-expanded="true" aria-controls="area-form">
+        <span>Area &amp; dates</span><span class="chev" aria-hidden="true">▾</span>
+      </button>
+
+      <form id="area-form" class="controls" novalidate>
         <fieldset class="ctrl-row area-mode">
           <legend class="ctrl-label">Area</legend>
           <div class="seg" role="radiogroup" aria-label="How to choose the area">
@@ -48,7 +126,7 @@
         </fieldset>
 
         <div class="mode-pane" data-mode="draw">
-          <p class="small muted">Use the <strong>rectangle, polygon or circle</strong> tool on the map (top-left), or switch to Bounds / Point to type coordinates. Only fires inside the shape are counted.</p>
+          <p class="small muted">Use the <strong>rectangle, polygon or circle</strong> tool on the map, or switch to Bounds / Point to type coordinates. Only fires inside the shape are counted.</p>
         </div>
         <div class="mode-pane fields4" data-mode="bounds" hidden>
           <label>West <input id="f-w" type="number" step="any" min="-180" max="180" inputmode="decimal" /></label>
@@ -74,96 +152,151 @@
         </div>
         <p class="small muted area-note">Areas are resolved on the 0.05° (~5 km) grid: a cell counts if its centre is inside the shape. The hotspot CSV uses exact detection positions. Areas under ~100,000 km² automatically get a wider uncertainty band on converted months.</p>
       </form>
-      <div id="map" role="region" aria-label="Map. Draw a rectangle, polygon or circle to choose an area; coordinates can also be typed above."></div>
     </section>
 
-    <!-- ───────────── Right: analysis ───────────── -->
-    <section id="analysis" class="right" aria-label="Analysis" tabindex="-1">
+    <article class="glass hero" id="card-current" aria-labelledby="h-current" data-level="info" hidden>
+      <header class="hero-h">
+        <h2 id="h-current" class="badge">This month vs history</h2>
+        <span class="hero-status" id="current-status"></span>
+      </header>
+      <div class="card-body" aria-live="polite"></div>
+      <div class="hero-foot" id="current-source"></div>
+    </article>
+  </div>
+
+  <!-- ───────────── Right rail: findings ───────────── -->
+  <aside class="rail" id="findings" aria-labelledby="h-findings" hidden>
+    <div class="rail-h">
+      <span class="rail-count" id="findings-count" aria-hidden="true">0</span>
+      <h2 id="h-findings">Findings</h2>
+      <span class="sr-only" id="findings-live" aria-live="polite"></span>
+    </div>
+    <div class="rail-list" id="findings-list"></div>
+  </aside>
+
+  <!-- ───────────── Legend ───────────── -->
+  <div class="legend" id="legend" role="group" aria-label="Map legend">
+    <div class="legend-ramp" id="legend-ramp" hidden></div>
+    <div class="legend-items">
+      <span class="legend-item"><span class="legend-line legend-area" aria-hidden="true"></span>Selected area</span>
+      <span class="legend-item"><span class="legend-swatch sw-critical" aria-hidden="true"></span>Most persistent event</span>
+      <span class="legend-item"><span class="legend-swatch sw-warning" aria-hidden="true"></span>Other top events</span>
+      <span class="legend-item"><span class="legend-swatch sw-selected" aria-hidden="true"></span>Selected event footprint</span>
+    </div>
+  </div>
+
+  <!-- ───────────── Bottom drawer: analysis ───────────── -->
+  <section id="analysis" class="glass drawer" aria-label="Analysis" tabindex="-1" data-size="half">
+    <div class="drawer-bar">
+      <div class="tabs" role="tablist" aria-label="Analysis sections">
+        <button type="button" role="tab" id="tab-calendar" aria-controls="panel-calendar" aria-selected="true" tabindex="0">Calendar</button>
+        <button type="button" role="tab" id="tab-season" aria-controls="panel-season" aria-selected="false" tabindex="-1">Seasonality</button>
+        <button type="button" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false" tabindex="-1">Events</button>
+        <button type="button" role="tab" id="tab-brief" aria-controls="panel-brief" aria-selected="false" tabindex="-1">Briefing</button>
+        <button type="button" role="tab" id="tab-downloads" aria-controls="panel-downloads" aria-selected="false" tabindex="-1">Downloads</button>
+        <button type="button" role="tab" id="tab-method" aria-controls="panel-method" aria-selected="false" tabindex="-1">Method</button>
+      </div>
+      <div class="drawer-tools">
+        <button type="button" class="icon-btn" id="drawer-expand" aria-pressed="false" aria-label="Expand analysis panel" title="Expand">⤢</button>
+        <button type="button" class="icon-btn" id="drawer-collapse" aria-expanded="true" aria-controls="drawer-body" aria-label="Collapse analysis panel" title="Collapse">▾</button>
+      </div>
+    </div>
+
+    <div class="drawer-body" id="drawer-body">
       <div id="empty" class="empty">
-        <h1>Pick an area to see its burning calendar</h1>
+        <h2 class="empty-h">Pick an area to see its burning calendar</h2>
         <p>Draw a rectangle, polygon or circle on the map, type coordinates, or choose a quick pick. Plume merges MODIS (Nov 2000→) and VIIRS (2012→) fire detections into one VIIRS-equivalent record of <em>fire cell-days</em>: the number of 0.05° grid cells with at least one vegetation-fire detection on a given day.</p>
       </div>
 
       <div id="cards" hidden>
-        <div class="grid2">
-          <article class="card" id="card-current" aria-labelledby="h-current">
-            <header class="card-h"><h2 id="h-current">This month vs. history</h2><span class="pill" id="current-source"></span></header>
-            <div class="card-body" aria-live="polite"></div>
+        <div role="tabpanel" id="panel-calendar" aria-labelledby="tab-calendar" tabindex="0" class="panel panel-split">
+          <article class="card" id="card-calendar" aria-labelledby="h-calendar">
+            <header class="card-h">
+              <h2 id="h-calendar">Burning calendar</h2>
+              <div class="card-tools">
+                <div class="seg seg-sm" role="radiogroup" aria-label="Calendar color">
+                  <label><input type="radio" name="calmode" value="counts" checked /> <span>Counts</span></label>
+                  <label><input type="radio" name="calmode" value="anomaly" /> <span>Anomaly vs. median</span></label>
+                  <label><input type="radio" name="calmode" value="raw" /> <span>Raw sensors</span></label>
+                </div>
+                <button type="button" class="btn btn-ghost btn-sm" id="png-calendar">PNG</button>
+              </div>
+            </header>
+            <p class="card-sub">Fire cell-days per month (VIIRS-equivalent, in Suomi NPP units). Hover or focus a cell; use arrow keys to move. <em>Raw sensors</em> shows the record without harmonization.</p>
+            <div class="card-body cal-wrap">
+              <div id="calendar"></div>
+              <div id="cal-tip" class="tip" role="tooltip" hidden></div>
+            </div>
+            <details class="table-fallback">
+              <summary>Show calendar as a table</summary>
+              <div id="cal-table" class="table-scroll"></div>
+            </details>
           </article>
-          <article class="card" id="card-precedent" aria-labelledby="h-precedent">
-            <header class="card-h"><h2 id="h-precedent">Precedent</h2></header>
+          <div class="panel-side">
+            <article class="card" id="card-summary" aria-labelledby="h-summary">
+              <header class="card-h"><h2 id="h-summary">Insights</h2></header>
+              <div class="card-body"></div>
+            </article>
+            <p id="handoff" class="handoff" hidden></p>
+            <p id="small-area-note" class="card-sub" hidden></p>
+          </div>
+        </div>
+
+        <div role="tabpanel" id="panel-season" aria-labelledby="tab-season" tabindex="0" class="panel" hidden>
+          <article class="card" id="card-season" aria-labelledby="h-season">
+            <header class="card-h">
+              <h2 id="h-season">Seasonality</h2>
+              <div class="card-tools"><button type="button" class="btn btn-ghost btn-sm" id="png-season">PNG</button></div>
+            </header>
+            <p class="card-sub">Typical year (median, 10–90% band across years) with the latest year drawn on top.</p>
+            <div class="card-body"></div>
+          </article>
+        </div>
+
+        <div role="tabpanel" id="panel-events" aria-labelledby="tab-events" tabindex="0" class="panel panel-split" hidden>
+          <article class="card" id="card-events" aria-labelledby="h-events">
+            <header class="card-h"><h2 id="h-events">Most persistent fire events</h2><span class="small muted" id="events-count"></span></header>
+            <p class="card-sub">Events are clusters of detections (adjacent cells, a few days apart), ranked by fire cell-days. <em>Footprint</em> is the detection footprint: km² of grid cells with detections, not a mapped fire perimeter. Select one to show it on the map.</p>
+            <div class="card-body"></div>
+          </article>
+          <div class="panel-side">
+            <article class="card" id="card-precedent" aria-labelledby="h-precedent">
+              <header class="card-h"><h2 id="h-precedent">Precedent</h2></header>
+              <div class="card-body" aria-live="polite"></div>
+            </article>
+          </div>
+        </div>
+
+        <div role="tabpanel" id="panel-brief" aria-labelledby="tab-brief" tabindex="0" class="panel" hidden>
+          <article class="card" id="card-brief" aria-labelledby="h-brief">
+            <header class="card-h">
+              <h2 id="h-brief">Briefing</h2>
+              <button type="button" class="btn btn-primary btn-sm" id="brief-btn">Generate briefing</button>
+            </header>
+            <p class="card-sub">Plain-language summary for a fire manager, written from the computed numbers only. No AI model is involved.</p>
             <div class="card-body" aria-live="polite"></div>
           </article>
         </div>
 
-        <article class="card" id="card-calendar" aria-labelledby="h-calendar">
-          <header class="card-h">
-            <h2 id="h-calendar">Burning calendar</h2>
-            <div class="card-tools">
-              <div class="seg seg-sm" role="radiogroup" aria-label="Calendar color">
-                <label><input type="radio" name="calmode" value="counts" checked /> <span>Counts</span></label>
-                <label><input type="radio" name="calmode" value="anomaly" /> <span>Anomaly vs. median</span></label>
-                <label><input type="radio" name="calmode" value="raw" /> <span>Raw sensors</span></label>
-              </div>
-              <button type="button" class="btn btn-ghost btn-sm" id="png-calendar">PNG</button>
+        <div role="tabpanel" id="panel-downloads" aria-labelledby="tab-downloads" tabindex="0" class="panel" hidden>
+          <article class="card" id="card-downloads" aria-labelledby="h-downloads">
+            <header class="card-h"><h2 id="h-downloads">Downloads</h2></header>
+            <p class="card-sub">The harmonized monthly series and the cleaned hotspots for the selected area and date range, plus the two charts as images.</p>
+            <div class="card-body dl-row">
+              <a class="btn btn-ghost" id="dl-calendar" href="#" download>Calendar CSV</a>
+              <a class="btn btn-ghost" id="dl-hotspots" href="#" download>Hotspots CSV</a>
+              <button type="button" class="btn btn-ghost" id="dl-png-cal">Calendar PNG</button>
+              <button type="button" class="btn btn-ghost" id="dl-png-season">Seasonality PNG</button>
             </div>
-          </header>
-          <p class="card-sub">Fire cell-days per month (VIIRS-equivalent, in Suomi NPP units). Hover or focus a cell; use arrow keys to move. <em>Raw sensors</em> shows the record without harmonization.</p>
-          <p id="handoff" class="handoff" hidden></p>
-          <p id="small-area-note" class="card-sub" hidden></p>
-          <div class="card-body cal-wrap">
-            <div id="calendar"></div>
-            <div id="cal-tip" class="tip" role="tooltip" hidden></div>
-          </div>
-          <details class="table-fallback">
-            <summary>Show calendar as a table</summary>
-            <div id="cal-table" class="table-scroll"></div>
-          </details>
-        </article>
-
-        <article class="card" id="card-season" aria-labelledby="h-season">
-          <header class="card-h">
-            <h2 id="h-season">Seasonality</h2>
-            <div class="card-tools"><button type="button" class="btn btn-ghost btn-sm" id="png-season">PNG</button></div>
-          </header>
-          <p class="card-sub">Typical year (median, 10–90% band across years) with the latest year drawn on top.</p>
-          <div class="card-body"></div>
-        </article>
-
-        <article class="card" id="card-summary" aria-labelledby="h-summary">
-          <header class="card-h"><h2 id="h-summary">Insights</h2></header>
-          <div class="card-body"></div>
-        </article>
-
-        <article class="card" id="card-events" aria-labelledby="h-events">
-          <header class="card-h"><h2 id="h-events">Most persistent fire events</h2><span class="small muted" id="events-count"></span></header>
-          <p class="card-sub">Events are clusters of detections (adjacent cells, a few days apart), ranked by fire cell-days. <em>Footprint</em> is the detection footprint: km² of grid cells with detections, not a mapped fire perimeter. Select one to show it on the map.</p>
-          <div class="card-body"></div>
-        </article>
-
-        <article class="card" id="card-brief" aria-labelledby="h-brief">
-          <header class="card-h">
-            <h2 id="h-brief">Briefing</h2>
-            <button type="button" class="btn btn-primary btn-sm" id="brief-btn">Generate briefing</button>
-          </header>
-          <p class="card-sub">Plain-language summary for a fire manager, written from the computed numbers only. No AI model is involved.</p>
-          <div class="card-body" aria-live="polite"></div>
-        </article>
-
-        <article class="card" id="card-downloads" aria-labelledby="h-downloads">
-          <header class="card-h"><h2 id="h-downloads">Downloads</h2></header>
-          <div class="card-body dl-row">
-            <a class="btn btn-ghost" id="dl-calendar" href="#" download>Calendar CSV</a>
-            <a class="btn btn-ghost" id="dl-hotspots" href="#" download>Hotspots CSV</a>
-            <button type="button" class="btn btn-ghost" id="dl-png-cal">Calendar PNG</button>
-            <button type="button" class="btn btn-ghost" id="dl-png-season">Seasonality PNG</button>
-          </div>
-        </article>
+          </article>
+        </div>
       </div>
 
-      <details class="card how" id="card-validation">
-        <summary><h2>How we harmonize, and how well it works</h2></summary>
-        <div class="how-text">
+      <div role="tabpanel" id="panel-method" aria-labelledby="tab-method" tabindex="0" class="panel" hidden>
+        <article class="card how" id="card-validation" aria-labelledby="h-method">
+          <header class="card-h"><h2 id="h-method">How we harmonize, and how well it works</h2></header>
+          <div class="method-cols">
+            <div class="how-text">
           <p><strong>Clean.</strong> We keep vegetation fires only (FIRMS type 0), drop low-confidence detections (MODIS confidence &lt; 30, VIIRS “low”), and remove duplicates.</p>
           <p><strong>Grid.</strong> Detections are counted as <em>fire cell-days</em>: the number of 0.05° grid cells (~5 km) with at least one detection on a given day, each counted once however many detections fall in it. This is the project’s own metric, not a FIRMS product, chosen so that pixel size matters less: it blunts the resolution gap between MODIS (1 km) and VIIRS (375 m). It measures where and for how long fire was detected, not area burned.</p>
           <p id="how-ratio"><strong>Learn the conversion.</strong> On overlap years (2012–2019, before the MODIS orbits drifted) we fit, for each calendar month, how many VIIRS cell-days each MODIS cell-day is worth, separately for weak and strong (high-FRP) MODIS detections. VIIRS’ finer pixels add far more detections around small, weak fires than around big intense ones, so one flat ratio would overstate big-wildfire years. A simple monthly ratio is kept as a baseline for comparison.</p>
@@ -172,14 +305,16 @@
           <p id="how-outages" hidden></p>
           <p><strong>After Suomi NPP.</strong> The VIIRS record here is the one on Suomi NPP, which <a href="https://www.earthdata.nasa.gov/data/alerts-outages/reminder-new-suomi-npp-observations-cease-november-2-2026" target="_blank" rel="noopener">stopped delivering new observations on 2 November 2026</a>. Later months (and the live current month, when the server has a FIRMS key) come from the VIIRS on NOAA-20, scaled to Suomi NPP units with a factor fitted while both satellites flew.</p>
         </div>
-        <div id="validation" class="card-body" aria-live="polite"></div>
-      </details>
-
-      <footer class="foot small muted">
-        Data: NASA FIRMS (MODIS C6.1; VIIRS 375 m on Suomi NPP and NOAA-20). Record: <span class="record-span">from Nov 2000</span>. Basemap © Esri, HERE, Garmin, © OpenStreetMap contributors. NASA Space Apps 2026.
-      </footer>
-    </section>
-  </main>
+            <div id="validation" class="card-body" aria-live="polite"></div>
+          </div>
+        </article>
+        <footer class="foot small muted">
+          Data: NASA FIRMS (MODIS C6.1; VIIRS 375 m on Suomi NPP and NOAA-20). Record: <span class="record-span">from Nov 2000</span>. Basemap © OpenStreetMap contributors, SRTM; map style © OpenTopoMap (CC-BY-SA). NASA Space Apps 2026.
+        </footer>
+      </div>
+    </div>
+  </section>
+  </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>

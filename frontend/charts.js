@@ -5,8 +5,8 @@ export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "
 export const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July", "August",
   "September", "October", "November", "December"];
 
-const FONT = "Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
-const C = { bg: "#151a21", text: "#e6e9ee", muted: "#8b95a1", line: "#262e39", missing: "#3a414b", accent: "#f0a04b" };
+const FONT = "IBM Plex Sans, system-ui, -apple-system, Segoe UI, sans-serif";
+const C = { bg: "#0f172a", text: "#f1f5f9", muted: "#94a3b8", line: "#283548", missing: "#334155", accent: "#f0a04b" };
 
 // ───────────────────────── ramps ─────────────────────────
 // viridis (matplotlib), 11 stops
@@ -97,7 +97,7 @@ export function calendarSVG(data, mode, coverage, health) {
   const modeDesc = mode === "anomaly" ? "anomaly versus monthly median" : raw ? `raw, un-harmonized fire cell-days (MODIS before ${OVERLAP_START}, VIIRS after)` : "fire cell-days";
   let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" tabindex="-1" role="group" aria-label="Burning calendar, ${years[0]} to ${years.at(-1)}, colored by ${modeDesc}. Use arrow keys to move between months.">`;
   s += `<defs>${gradientDef("g-count", (t) => viridis(t))}${gradientDef("g-anom", diverging)}`;
-  s += `<pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="4" fill="#2a313b"/><line x1="0" y1="0" x2="0" y2="4" stroke="${C.muted}" stroke-width="1.6"/></pattern>`;
+  s += `<pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="4" height="4" fill="#283548"/><line x1="0" y1="0" x2="0" y2="4" stroke="${C.muted}" stroke-width="1.6"/></pattern>`;
   s += `<pattern id="nocmp" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)"><rect width="5" height="5" fill="${C.missing}"/><line x1="0" y1="0" x2="0" y2="5" stroke="${C.muted}" stroke-width="1"/></pattern></defs>`;
   s += `<rect width="${W}" height="${H}" fill="${C.bg}"/>`;
 
@@ -133,7 +133,7 @@ export function calendarSVG(data, mode, coverage, health) {
       }
       if (peak && peak.year === y && peak.month === mo) {
         peakRect = `<rect x="${x - 1.5}" y="${yy - 1.5}" width="${cw + 3}" height="${ch + 3}" rx="3" fill="none" stroke="#ffffff" stroke-width="2" pointer-events="none"/>` +
-          `<rect x="${x + 0.5}" y="${yy + 0.5}" width="${cw - 1}" height="${ch - 1}" rx="1.5" fill="none" stroke="#0e1116" stroke-width="1" pointer-events="none"/>`;
+          `<rect x="${x + 0.5}" y="${yy + 0.5}" width="${cw - 1}" height="${ch - 1}" rx="1.5" fill="none" stroke="#0f172a" stroke-width="1" pointer-events="none"/>`;
       }
     }
   });
@@ -325,7 +325,7 @@ export function validationSVG(annual) {
   const drift = rows.filter((r) => r.modis_drift?.length);
   if (drift.length) {
     const i0 = rows.indexOf(drift[0]);
-    s += `<defs><pattern id="vhatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#3a414b" stroke-width="2"/></pattern></defs>`;
+    s += `<defs><pattern id="vhatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="#334155" stroke-width="2"/></pattern></defs>`;
     s += `<rect x="${L + gw * i0}" y="${T}" width="${gw * drift.length}" height="${ph}" fill="url(#vhatch)" opacity="0.6"/>`;
   }
   rows.forEach((r, i) => {
