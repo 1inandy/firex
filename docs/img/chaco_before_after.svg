@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 380" font-family="system-ui,sans-serif" font-size="12" fill="#222"><rect width="780" height="380" fill="#fff"/>
+<text x="84" y="22" font-size="16" font-weight="600">Gran Chaco &amp; Paraná Delta (AR): one fire record instead of two</text>
+<text x="84" y="40" fill="#555">Annual fire cell-days. Watching the same fires (2012→), VIIRS counts about 2× MODIS.</text>
+<line x1="84" x2="760" y1="314.0" y2="314.0" stroke="#d9d9d9"/><text x="78" y="318.0" text-anchor="end">0</text>
+<line x1="84" x2="760" y1="249.5" y2="249.5" stroke="#d9d9d9"/><text x="78" y="253.5" text-anchor="end">30,000</text>
+<line x1="84" x2="760" y1="185.0" y2="185.0" stroke="#d9d9d9"/><text x="78" y="189.0" text-anchor="end">60,000</text>
+<line x1="84" x2="760" y1="120.5" y2="120.5" stroke="#d9d9d9"/><text x="78" y="124.5" text-anchor="end">90,000</text>
+<line x1="84" x2="760" y1="56.0" y2="56.0" stroke="#d9d9d9"/><text x="78" y="60.0" text-anchor="end">120,000</text>
+<text x="205.7" y="330" text-anchor="middle">2005</text>
+<text x="340.9" y="330" text-anchor="middle">2010</text>
+<text x="476.1" y="330" text-anchor="middle">2015</text>
+<text x="611.3" y="330" text-anchor="middle">2020</text>
+<text x="746.5" y="330" text-anchor="middle">2025</text>
+<text transform="translate(16 185.0) rotate(-90)" text-anchor="middle" fill="#555">fire cell-days per year</text>
+<line x1="381.4" x2="381.4" y1="56" y2="314" stroke="#999" stroke-dasharray="3 3"/><text x="385.4" y="68" fill="#777">VIIRS starts</text>
+<path d="M97.5,191.7 L124.6,204.5 L151.6,102.5 L178.6,117.8 L205.7,188.8 L232.7,147.6 L259.8,169.7 L286.8,113.8 L313.8,172.2 L340.9,198.7 L367.9,174.9 L395.0,199.2 L422.0,190.5 L449.0,248.5 L476.1,225.2 L503.1,223.3 L530.2,222.2 L557.2,216.4 L584.2,227.5 L611.3,81.1 L638.3,205.4 L665.4,180.3 L692.4,232.1 L719.4,228.9 L746.5,220.4" fill="none" stroke="#009E73" stroke-width="5"/>
+<path d="M97.5,292.4 L124.6,266.6 L151.6,212.7 L178.6,219.9 L205.7,253.1 L232.7,234.6 L259.8,243.1 L286.8,216.8 L313.8,246.0 L340.9,257.1 L367.9,244.8 L395.0,256.7 L422.0,254.3 L449.0,284.0 L476.1,273.2 L503.1,268.8 L530.2,268.1 L557.2,269.7 L584.2,272.7 L611.3,203.5 L638.3,264.6 L665.4,252.8 L692.4,274.6 L719.4,268.5 L746.5,269.5" fill="none" stroke="#E69F00" stroke-width="2" stroke-dasharray="6 4"/>
+<path d="M395.0,199.2 L422.0,190.5 L449.0,248.5 L476.1,225.2 L503.1,223.3 L530.2,222.2 L557.2,216.4 L584.2,227.5 L611.3,81.1 L638.3,205.4 L665.4,180.3 L692.4,232.1 L719.4,228.9 L746.5,220.4" fill="none" stroke="#0072B2" stroke-width="2"/>
+<line x1="84" x2="106" y1="364" y2="364" stroke="#E69F00" stroke-width="3" stroke-dasharray="6 4"/><text x="112" y="368">raw MODIS (Terra + Aqua)</text>
+<line x1="294.4" x2="316.4" y1="364" y2="364" stroke="#0072B2" stroke-width="3"/><text x="322.4" y="368">raw VIIRS (Suomi NPP)</text>
+<line x1="485.0" x2="507.0" y1="364" y2="364" stroke="#009E73" stroke-width="3"/><text x="513.0" y="368">harmonized record (VIIRS-equivalent)</text>
+</svg>
